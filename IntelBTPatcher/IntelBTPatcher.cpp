@@ -145,6 +145,12 @@ static uint32_t advDataCount, reportCount, hotspotAnswers, lastRssi;
 static uint32_t advTypeMask, reportTypeMask, reportEvtMask;
 static uint32_t shownTypeMask, shownEvtMask;
 static bool inviteSaved;
+// The address last put on the filter accept list, and how often an advertiser used it. A policy-1
+// create can only match when these agree: the controller has no resolving list, so it compares the
+// six bytes literally instead of resolving a private address first. An accept-list address that is
+// never heard on the air is an identity address, and no timeout will ever find it.
+static uint8_t acceptAddr[6] {};
+static uint32_t acceptAddrHeard, advAddrCount;
 static void witnessAdvData(const uint8_t *hci, size_t length) {
     Ibtp::PayloadRange payload {};
     if (!Ibtp::payloadRange(hci, length, &payload))
@@ -196,6 +202,19 @@ static void witnessAdvReport(const uint8_t *event, size_t size) {
     }
     if (!(++reportCount & 15))
         publishValue("IbtpAdvReports", reportCount);
+    // Does the accept-list address ever show up on the air? Answered here rather than inferred later,
+    // because a stale or identity entry looks exactly like a working one until the create times out.
+    bool heard = false;
+    for (int i = 0; i < count; ++i)
+        heard = heard || Ibtp::addressEquals(items[i].addr, acceptAddr);
+    if (heard)
+        publishValue("IbtpAcceptAddrHeard", ++acceptAddrHeard);
+    if ((++advAddrCount & 63) == 0) {
+        if (OSData *raw = OSData::withBytes(items[count - 1].addr, 6)) {
+            IORegistryEntry::getRegistryRoot()->setProperty("IbtpAdvLastAddr", raw);
+            raw->release();
+        }
+    }
 }
 // What the create asked for and what the controller answered.
 static uint32_t opMask;
@@ -203,23 +222,30 @@ static uint16_t failOp;
 static uint8_t failStatus;
 static uint32_t failCount;
 static uint16_t createOp;
-static uint8_t createPolicy, createAddrType, createPeer[6];
+static uint8_t createPolicy, createAddrType, createPeerType, createPeer[6];
 static uint32_t createCompletes, connEvents, connOk, createStatuses, cancels;
 static uint8_t createStatus, connStatus;
+// Which filter policies bluetoothd has used since boot, one bit each, and how often it named a peer
+// address. The last create alone cannot answer either: a policy 0 with a real address is the only
+// form the controller can act on without a resolving list, so whether that form ever appears decides
+// which fix is even possible.
+static uint32_t policySeen, peersGiven;
 static void witnessCreate(const uint8_t *hci, size_t length) {
     if (!hci || length < 3)
         return;
     const uint16_t op = Ibtp::opcodeOf(hci);
     createOp = op;
-    if (op == Ibtp::OpLeExtCreateConn && length >= 11) {
-        // filter policy, address type, address, ...
+    if (op == Ibtp::OpLeExtCreateConn && length >= 12) {
+        // filter policy, own address type, peer address type, peer address
         createPolicy = hci[3];
         createAddrType = hci[4];
-        memcpy(createPeer, hci + 5, 6);
+        createPeerType = hci[5];
+        memcpy(createPeer, hci + 6, 6);
     } else if (op == Ibtp::OpLeCreateConn && length >= 15) {
-        // scan interval, scan window, filter policy, address type, address
+        // scan interval, scan window, filter policy, peer address type, peer address
         createPolicy = hci[7];
         createAddrType = hci[8];
+        createPeerType = hci[8];
         memcpy(createPeer, hci + 9, 6);
     } else {
         return;
@@ -227,7 +253,65 @@ static void witnessCreate(const uint8_t *hci, size_t length) {
     IORegistryEntry::getRegistryRoot()->setProperty("IbtpCreateOpcode", createOp, 16);
     IORegistryEntry::getRegistryRoot()->setProperty("IbtpCreateFilterPolicy", createPolicy, 8);
     IORegistryEntry::getRegistryRoot()->setProperty("IbtpCreateAddrType", createAddrType, 8);
+    IORegistryEntry::getRegistryRoot()->setProperty("IbtpCreatePeerType", createPeerType, 8);
     IORegistryEntry::getRegistryRoot()->setProperty("IbtpCreatePeerAddr", createPeer, 6);
+    if (createPolicy < 32 && !(policySeen & (1U << createPolicy))) {
+        policySeen |= 1U << createPolicy;
+        IORegistryEntry::getRegistryRoot()->setProperty("IbtpCreatePolicyMask", policySeen, 32);
+    }
+    bool named = false;
+    for (unsigned i = 0; i < 6; ++i)
+        named = named || createPeer[i] != 0;
+    if (named)
+        IORegistryEntry::getRegistryRoot()->setProperty("IbtpCreateWithPeer", ++peersGiven, 32);
+}
+
+// What goes on the filter accept list, and whether anything ever goes on the resolving list. Without
+// a resolving list the controller compares accept-list entries literally, so the type and value here
+// are the whole reason a policy-1 create cannot match a peer advertising from a private address.
+static uint32_t acceptAdds, resolvingAdds;
+static void witnessLists(const uint8_t *hci, size_t length) {
+    if (!hci || length < 10)
+        return;
+    const uint16_t op = Ibtp::opcodeOf(hci);
+    if (op != Ibtp::OpLeAcceptListAdd && op != Ibtp::OpLeResolvingAdd)
+        return;
+    // Both commands are address type then address. The rest of the resolving entry is the IRK.
+    auto *root = IORegistryEntry::getRegistryRoot();
+    if (op == Ibtp::OpLeAcceptListAdd)
+        root->setProperty("IbtpAcceptAdds", ++acceptAdds, 32);
+    else
+        root->setProperty("IbtpResolvingAdds", ++resolvingAdds, 32);
+    root->setProperty("IbtpListLastType", uint32_t(hci[3]), 8);
+    uint8_t addr[6];
+    memcpy(addr, hci + 4, sizeof(addr));
+    root->setProperty("IbtpListLastAddr", addr, 6);
+    if (op == Ibtp::OpLeAcceptListAdd)
+        memcpy(acceptAddr, addr, sizeof(acceptAddr));
+}
+
+// Vendor commands. The host hands its IRKs to Broadcom parts through one of these instead of the
+// standard LE Add Device To Resolving List, so a controller that never sees one is a controller the
+// host never asked to resolve anything. Opcode plus the first bytes of the payload identify the
+// family without guessing at a payload layout this driver has no other way to learn.
+static uint32_t vendorCount;
+static void witnessVendor(const uint8_t *hci, size_t length) {
+    if (!hci || length < 3)
+        return;
+    const uint16_t op = Ibtp::opcodeOf(hci);
+    if ((op & 0xfc00) != 0xfc00)
+        return;
+    auto *root = IORegistryEntry::getRegistryRoot();
+    root->setProperty("IbtpVendorLastOpcode", uint32_t(op), 16);
+    root->setProperty("IbtpVendorLastLength", uint32_t(length), 16);
+    const size_t take = length > 3 ? (length - 3 > 24 ? 24 : length - 3) : 0;
+    if (take) {
+        if (OSData *params = OSData::withBytes(hci + 3, uint32_t(take))) {
+            root->setProperty("IbtpVendorLastParams", params);
+            params->release();
+        }
+    }
+    root->setProperty("IbtpVendorCmds", ++vendorCount, 32);
 }
 
 // Intel's vendor ID also sits on hubs and other devices. Without the controller's product name it
@@ -268,6 +352,9 @@ static IOReturn sendAdded(void *that, IOService *provider, const StandardUSB::De
 }
 
 static uint32_t addedCommands {}, addedAddresses {}, addedFailures {};
+// The seed is counted apart from the follow-ups: it is the one command the whole workaround exists
+// for, and until this counter appeared there was no way to tell whether it ever left the machine.
+static uint32_t seededAddresses {}, seedFailures {};
 static IOReturn deviceRequestHook(void *that, IOService *provider, StandardUSB::DeviceRequest &request, void *data,
                                   IOMemoryDescriptor *descriptor, unsigned int &length,
                                   IOUSBHostCompletion *completion, uint32_t timeout) {
@@ -321,6 +408,8 @@ static IOReturn deviceRequestHook(void *that, IOService *provider, StandardUSB::
                 __atomic_store_n(&watchBudget, 400, __ATOMIC_RELAXED);
             publishValue("IbtpFeatureAsks", ++featureAsks);
         }
+        witnessLists(hci, hciLength);
+        witnessVendor(hci, hciLength);
         // Witness every advertising payload the host publishes, before any decision below can change
         // a byte. It is the only way to see whether the 0x0D invite frame goes out.
         witnessAdvData(hci, hciLength);
@@ -375,7 +464,7 @@ static IOReturn deviceRequestHook(void *that, IOService *provider, StandardUSB::
             }
             publishMirrors(mirror);
         }
-        seedLegacyAddress = Ibtp::shouldSeedLegacyAddress(mirror, hci, hciLength);
+        seedLegacyAddress = Ibtp::wantsSeedLegacyAddress(mirror, hci, hciLength);
         follow = Ibtp::mirrorCommand(mirror, hci, hciLength, scanPatchOn);
         IOLockUnlock(mirrorLock);
         if (featureLock) {
@@ -428,10 +517,19 @@ static IOReturn deviceRequestHook(void *that, IOService *provider, StandardUSB::
         }
     }
     if (seedLegacyAddress) {
-        // IntelBTPatcher's workaround, sent before the scan command like the original.
+        // IntelBTPatcher's workaround, sent before the scan command like the original. The mirror
+        // flag moves only after the controller accepted it, so a rejected seed is tried again on the
+        // next scan-parameters command instead of being counted as done.
         uint8_t seed[9] = {0x05, 0x20, 0x06};
         lilu_os_memcpy(seed + 3, Ibtp::kLegacySeedAddress, 6);
-        sendAdded(that, provider, request, seed, sizeof(seed), timeout);
+        if (sendAdded(that, provider, request, seed, sizeof(seed), timeout) == kIOReturnSuccess) {
+            publishValue("IbtpLegacyAddresses", ++seededAddresses);
+            IOLockLock(mirrorLock);
+            Ibtp::noteSeedAccepted(mirror);
+            IOLockUnlock(mirrorLock);
+        } else {
+            publishValue("IbtpLegacySeedFailures", ++seedFailures);
+        }
     }
     static bool sawCommand {};
     if (hciLength >= 3 && !sawCommand) {
@@ -810,7 +908,7 @@ kern_return_t _start(kmod_info_t *ki, void *data) { return IntelBTPatcher_kern_s
 kern_return_t _stop(kmod_info_t *ki, void *data) { return IntelBTPatcher_kern_stop(ki, data); }
 #else
 // The kmod name must equal CFBundleIdentifier in the built Info.plist.
-__attribute__((visibility("default"))) KMOD_EXPLICIT_DECL(com.zxystd.IntelBTPatcher, "2.4.1", _start, _stop)
+__attribute__((visibility("default"))) KMOD_EXPLICIT_DECL(com.zxystd.IntelBTPatcher, "2.4.2", _start, _stop)
 __attribute__((visibility("hidden"))) kmod_start_func_t *_realmain = IntelBTPatcher_kern_start;
 __attribute__((visibility("hidden"))) kmod_stop_func_t *_antimain = IntelBTPatcher_kern_stop;
 __attribute__((visibility("hidden"))) int _kext_apple_cc = __APPLE_CC__;

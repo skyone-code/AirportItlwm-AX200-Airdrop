@@ -147,7 +147,7 @@ struct Mirror {
     bool hasOwnAddress;
     bool ownFromController;         // ownAddress came from 0x2005, not from a set
     uint32_t addressed;             // sets already given an address, bit per handle
-    bool seedSent;                  // the fixed legacy address has gone out
+    bool seeded;                    // the fixed legacy address was accepted by the controller
     uint8_t perSetAddress[32][6];
     uint32_t knownSets;             // sets whose address bluetoothd has named, bit per handle
     uint8_t scanOn, scanDup;
@@ -408,12 +408,13 @@ inline bool widenInitiatorScan(uint8_t *hci, size_t length, uint32_t *observed) 
 }
 
 // True once per controller start, just before the first legacy scan parameters command.
-inline bool shouldSeedLegacyAddress(Mirror &m, const uint8_t *hci, size_t length) {
-    if (!hci || length < 3 || opcodeOf(hci) != OpLeScanParams || m.seedSent)
-        return false;
-    m.seedSent = true;
-    return true;
+// Asked before the command goes out, so it only says whether the seed is still owed. Nothing is
+// latched here: the flag moves only once the controller has answered the seed, which is what makes
+// a rejected one retry on the next scan-parameters command instead of disappearing.
+inline bool wantsSeedLegacyAddress(const Mirror &m, const uint8_t *hci, size_t length) {
+    return hci && length >= 3 && opcodeOf(hci) == OpLeScanParams && !m.seeded;
 }
+inline void noteSeedAccepted(Mirror &m) { m.seeded = true; }
 
 // ---- commands that have to follow the host's own ---------------------------------------
 // What to send after the host's command was accepted, and whether anything is to be sent at all.
