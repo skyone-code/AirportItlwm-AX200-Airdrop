@@ -270,6 +270,10 @@ static int awdlCoexQueue = -1;
 // it and the station. Without it, or if that channel can't be used, the listener shares the station's.
 constexpr int kAwdlCoexPhyId = 1;
 static bool awdlCoexMulti, awdlCoexMultiActive;
+// A MAC context that went in but whose binding failed with the command ring full: the context is still
+// in the firmware and it could not be taken out at the time either. The next add clears it first, because
+// the firmware refuses a second context with the same id.
+static bool awdlCoexMacStale;
 static const char *awdlCoexMultiState = "off";
 static uint32_t awdlCoexPhyResult, awdlCoexMultiBindResult;
 // The listener's PHY context width. It applies only while that context's own command is being built:
@@ -330,6 +334,10 @@ static bool awdlCoexSetupCurrent(int generation);
 static bool awdlCoexBaQueueCurrent(int generation, uint32_t listener, uint32_t peer);
 // Where its last queue allocation stopped, and the number the firmware gave.
 static const char *awdlCoexQueueStage = "none";
+// Why the listener's queue was refused, in the same words the failure stage uses, plus the number the
+// firmware answered with. Published so a refused allocation says which occupant stood in the way.
+static const char *awdlCoexQueueClash = "none";
+static uint32_t awdlCoexQueueFwqid, awdlCoexTidQidsCleared;
 static int awdlCoexQueueAssigned = -1;
 static uint32_t awdlCoexQueueWritePointer = 0xffffffffU;
 #include <AWDLTxBurst.hpp>
@@ -3994,10 +4002,48 @@ iwx_tvqm_enable_txq(struct iwx_softc *sc, int tid, int ssn, uint32_t size, int s
             err = -ECANCELED;
             goto fail;
         }
-        bool used = fwqid <= 0 || fwqid == IWX_DQA_CMD_QUEUE || fwqid == sc->first_data_qid ||
-            fwqid == awdlCoexOrphanQueue;
+        // A TID queue belongs to the station, so entry for it only means something while the station is
+        // joined. Once the association is gone those numbers are bookkeeping the firmware no longer holds --
+        // and keeping them refused the listener the very queue it had owned since boot: measured after
+        // leaving a network, the firmware answered 1 again, a stale TID claimed 1, and the listener's data
+        // path never came back until the next boot. Clear them when no station is running.
+        if (sc->sc_ic.ic_state != IEEE80211_S_RUN) {
+            for (int t = 0; t < int(nitems(sc->sc_tid_data)); ++t)
+                if (sc->sc_tid_data[t].qid != IWX_INVALID_QUEUE) {
+                    sc->sc_tid_data[t].qid = IWX_INVALID_QUEUE;
+                    ++awdlCoexTidQidsCleared;
+                }
+        }
+        awdlCoexQueueFwqid = uint32_t(fwqid);
+        awdlCoexQueueClash = "none";
+        bool used = fwqid <= 0 || fwqid == IWX_DQA_CMD_QUEUE || fwqid == awdlCoexOrphanQueue;
+        if (fwqid <= 0 || fwqid == IWX_DQA_CMD_QUEUE)
+            awdlCoexQueueClash = "reserved";
+        // The number the management queue got is the station's while the station is joined. With nothing
+        // joined that queue carries nothing, and refusing the number locked the listener out of the data
+        // path for the rest of the boot: measured, the firmware answered 1 on every attempt after leaving a
+        // network, the guard called it first-data, and only a reboot brought the listener's queue back.
+        if (fwqid == sc->first_data_qid) {
+            if (sc->sc_ic.ic_state == IEEE80211_S_RUN) {
+                used = true;
+                awdlCoexQueueClash = "first-data";
+                // Its own stage: the number is the station's for as long as it is joined, but the station
+                // only holds it once the join has settled -- measured, the firmware answered 1 during the
+                // join and 2 a second later. The caller waits instead of spending its attempts here.
+                failureStage = "queue-first-data";
+            } else {
+                awdlCoexQueueClash = "first-data-shared";
+            }
+        }
+        if (fwqid == awdlCoexOrphanQueue) {
+            used = true;
+            awdlCoexQueueClash = "orphan";
+        }
         for (int t = 0; t < int(nitems(sc->sc_tid_data)); ++t)
-            used |= sc->sc_tid_data[t].qid == fwqid;
+            if (sc->sc_tid_data[t].qid == fwqid) {
+                used = true;
+                awdlCoexQueueClash = "tid";
+            }
         if (used) {
             failureStage = "queue-owned";
             err = -EIO;
@@ -6164,6 +6210,10 @@ static uint32_t awdlCoexZeroPadTrimmed;   // listener frames whose trailing zero
 constexpr uint32_t kAwdlCoexTxPeriodMS = 113;
 constexpr uint64_t kAwdlCoexTxStuckUS = 1000000;
 constexpr uint32_t kAwdlCoexTxSetupTries = 3;
+// A queue number the station's own bookkeeping claims is not this listener's failure to make: the firmware
+// hands one out while the station is still settling, and the same number comes back on every immediate
+// retry. Ask again after a beat instead, which is also what keeps the join path clear of command traffic.
+constexpr uint64_t kAwdlCoexQueueRetryUS = 500000;
 static bool awdlCoexTxStaAdded, awdlCoexInFlight, awdlCoexSending, awdlCoexAddrKnown;
 static uint8_t awdlCoexAddr[6];
 static uint64_t awdlCoexInFlightUS;
@@ -6177,6 +6227,9 @@ static uint8_t awdlCoexDataBuf[2304 + 4];
 static CTimeout *awdlCoexTxTimer;
 static struct task awdlCoexTxTaskEntry;
 static uint32_t awdlCoexTxSetupTried, awdlCoexStaResult, awdlCoexQueueResult;
+// When the next setup attempt may start. Only a refused queue number sets it, so a settled listener retries
+// at once and only a clash waits.
+static uint64_t awdlCoexTxSetupNextUS;
 static uint32_t awdlCoexTxBuilt, awdlCoexTxNotReady, awdlCoexTxSubmitted, awdlCoexTxSubmitErrors;
 // Sync builds the listener attempted while the station was unassociated: the counter that proves the
 // listener no longer waits for an association to send.
@@ -6250,7 +6303,7 @@ static bool awdlCoexSameBand;
 static bool awdlCoexBaAskShared;
 static uint32_t awdlCoexBaAsksShared;
 // Block Ack on the shared context (#16, #24): when the listener shares the station's binding (without
-// -itlawdlcoexmulti, or in its fallback), receive and send Block Ack run there as well. Earlier they
+// -itlawdlcoexmulti, or in its fallback), receive and send Block Ack run there as well. Until 0.5.3 they
 // ran only with the listener on its own context, so a shared listener answered no ADDBA request and sent
 // every frame singly (#16: 84 requests, 0 answers, about 1 MB/s). -itlawdlnosharedba restores that, for an A/B.
 static bool awdlCoexNoSharedBa;
@@ -6719,6 +6772,9 @@ static void awdlCoexPublish()
     if (awdlCoexTx) {
         root->setProperty("ITLAWDLCoexStaResult", awdlCoexStaResult, 32);
         root->setProperty("ITLAWDLCoexQueueResult", awdlCoexQueueResult, 32);
+        root->setProperty("ITLAWDLCoexQueueClash", awdlCoexQueueClash);
+        root->setProperty("ITLAWDLCoexQueueFwqid", awdlCoexQueueFwqid, 32);
+        root->setProperty("ITLAWDLCoexTidQidsCleared", awdlCoexTidQidsCleared, 32);
         root->setProperty("ITLAWDLCoexQueueStage", awdlCoexQueueStage);
         root->setProperty("ITLAWDLCoexQueueAssigned", uint32_t(awdlCoexQueueAssigned), 32);
         root->setProperty("ITLAWDLCoexQueueWritePointer", awdlCoexQueueWritePointer, 32);
@@ -8069,9 +8125,24 @@ awdlCoexTxTask(void *arg)
         that->awdlCoexRetarget(sc);
     if ((running || awdlSelfLink) && awdlCoexAdded && awdlCoexGeneration == sc->sc_generation) {
         if (!awdlCoexTxStaAdded && awdlCoexTxSetupTried < kAwdlCoexTxSetupTries &&
-            awdlCoexBrokenGeneration != sc->sc_generation) {
+            awdlCoexBrokenGeneration != sc->sc_generation &&
+            awdlUptimeUS() >= awdlCoexTxSetupNextUS) {
             ++awdlCoexTxSetupTried;
             (void)that->awdlCoexTxSetup(sc);
+            // A number the station's bookkeeping still claims is not the listener's failure to make: keep
+            // trying on later beats instead of spending this firmware's three attempts on it, and leave a
+            // beat between tries. Measured while joining, an immediate retry got the same number back and
+            // the burst itself disturbed the join -- the same question answered correctly a second later.
+            const bool queueRefused = !strcmp(awdlCoexQueueStage, "queue-owned") ||
+                !strcmp(awdlCoexQueueStage, "queue-busy") || !strcmp(awdlCoexQueueStage, "queue-first-data");
+            if (awdlCoexTxStaAdded) {
+                awdlCoexTxSetupTried = 0;
+                awdlCoexTxSetupNextUS = 0;
+            } else if (queueRefused) {
+                if (awdlCoexTxSetupTried)
+                    --awdlCoexTxSetupTried;
+                awdlCoexTxSetupNextUS = awdlUptimeUS() + kAwdlCoexQueueRetryUS;
+            }
         }
         const uint64_t watchNowUS = awdlUptimeUS();
         if (awdlCoexTxStaAdded && awdlCoexInFlight && watchNowUS - awdlCoexInFlightUS > kAwdlCoexTxStuckUS &&
@@ -16495,28 +16566,8 @@ iwx_run(struct iwx_softc *sc)
         return err;
     }
     // The probe's failure is recorded, never passed on: Wi-Fi carries on without the listener.
-    if (awdlCoexProbe && awdlCoexWant) {
-        // v59: a join moves the listener. Built while nothing was joined it owns a private PHY context and a
-        // channel of its own; with a station the firmware schedules AWDL on the station's context, on the AP's
-        // channel. The add below is idempotent (add == added returns immediately), so without clearing the
-        // flags first the unassociated listener simply survives the join and keeps sending from a private
-        // context. Measured after an unassociated transfer followed by joining: en1 had an address while
-        // MultiState still said own-channel on 149, the first Airdrop sat in "waiting" for its whole timeout
-        // and only the retry went through -- by then the flag had changed. Clearing the add here makes the
-        // call below re-bind the same contexts to the station's PHY; the TX station is rebuilt by the boot
-        // task, which is running while the station is up. Dropping the association brings the private
-        // context back through the ordinary boot-task path, since the node loses its PHY context again.
-        if (awdlCoexAdded && awdlCoexMultiActive && in && in->in_phyctxt) {
-            awdlCoexAdded = false;
-            awdlCoexTxStaAdded = false;
-            awdlCoexMultiActive = false;
-            awdlCoexOwnChan = nullptr;
-            awdlCoexMovePending = false;
-            awdlCoexMultiState = "restationed";
-            ++awdlCoexRestations;
-        }
+    if (awdlCoexProbe && awdlCoexWant)
         (void)awdlCoexListener(sc, true);
-    }
     return 0;
 }
 
@@ -16760,6 +16811,7 @@ awdlCoexRetarget(struct iwx_softc *sc)
             return;
         awdlCoexTxHalted = true;
         awdlCoexTxSetupTried = kAwdlCoexTxSetupTries;
+        awdlCoexTxSetupNextUS = 0;
         if (drainTok != awdlCoexToken || ic->ic_bss != drainBss || !awdlCoexAdded || !awdlCoexMultiActive) {
             // The listener changed while flushing: this move's decision is stale.
             awdlCoexMovePending = false;
@@ -16876,6 +16928,8 @@ awdlCoexListener(struct iwx_softc *sc, bool add)
         awdlCoexMultiActive = false;
         awdlCoexOwnChan = nullptr;
         awdlCoexMovePending = false;
+        // A restart took every context with it, so nothing of ours is left to clear.
+        awdlCoexMacStale = false;
         awdlCoexPromiscLive = false;
         awdlCoexPromiscUncertain = false;
         for (auto &s : awdlCoexBaSlots) {
@@ -16894,6 +16948,7 @@ awdlCoexListener(struct iwx_softc *sc, bool add)
         awdlCoexBaFilter = ItlAWDL::BaFilterState{};
         awdlCoexQueue = -1;
         awdlCoexTxSetupTried = 0;
+        awdlCoexTxSetupNextUS = 0;
         awdlCoexGeneration = sc->sc_generation;
         ++awdlCoexToken;
     }
@@ -16961,12 +17016,13 @@ awdlCoexListener(struct iwx_softc *sc, bool add)
     if (add)
         awdlCoexOwnChan = nullptr;
         awdlCoexMovePending = false;
-    // v59: a private channel is only for the station-less case. With a station the listener belongs on its
-    // PHY context -- that is where the firmware schedules AWDL once the station is joined, on the AP's
-    // channel -- so picking our own channel here would build the listener for the wrong radio. Before this,
-    // a join kept whatever the unassociated boot had built (measured: en1 had an address while MultiState
-    // said own-channel on 149) and the first transfer afterwards waited out its timeout.
-    if (add && awdlCoexMulti && (!in || !in->in_phyctxt)) {
+    // The listener keeps its own channel whenever multi is enabled, joined or not. v59 restricted this to the
+    // station-less case and bound the listener onto the station's PHY instead, which is a different radio:
+    // measured on a 5 GHz AP at 153, an associated listener there transmitted a handful of frames, never got
+    // one acknowledged, and stopped hearing the peer's sync frames entirely -- while the same transfer over
+    // the private context on 149 moved thousands of frames. A station on another channel therefore does not
+    // take the listener's context away from it.
+    if (add && awdlCoexMulti) {
         uint8_t ownWidth = IWX_PHY_VHT_CHANNEL_MODE20;
         const int ownNumber = awdlCoexPickOwn(sc, &ownWidth);
         if (!isset(sc->sc_enabled_capa, IWX_UCODE_TLV_CAPA_DYNAMIC_QUOTA)) {
@@ -17044,6 +17100,12 @@ awdlCoexListener(struct iwx_softc *sc, bool add)
     int err = 0;
     uint32_t status = 0;
     if (add) {
+        if (awdlCoexMacStale) {
+            // Left over from an attempt that got its context in and could not bind or take it out (both hit
+            // a full command ring). Clear it first; the firmware refuses a second context with this id.
+            (void)awdlCoexMacSend(sc, IWX_FW_CTXT_ACTION_REMOVE);
+            awdlCoexMacStale = false;
+        }
         err = awdlCoexMacSend(sc, IWX_FW_CTXT_ACTION_ADD);
         awdlCoexMacResult = err ? 0x80000000U | uint32_t(err) : 1;
         if (gen != sc->sc_generation)
@@ -17062,6 +17124,15 @@ awdlCoexListener(struct iwx_softc *sc, bool add)
             return ECANCELED;
         }
         if (err) {
+            // EWOULDBLOCK is the command ring saying "no slot yet": the command never left the host, so
+            // nothing was created and the next beat can simply try again. Treating it as a real failure is
+            // what killed AWDL for the rest of a generation after a disassociation -- measured: MacResult 1,
+            // BindResult 0x80000023 (EAGAIN), Broken Yes, BootTries frozen at 32.
+            if (err == EWOULDBLOCK) {
+                awdlCoexMultiState = "mac-busy";
+                awdlCoexPublish();
+                return err;
+            }
             // This command has no response to read, so a failure doesn't say whether the firmware made
             // the context. Don't add it again until the firmware restarts.
             ++awdlCoexTeardownErrors;
@@ -17072,7 +17143,9 @@ awdlCoexListener(struct iwx_softc *sc, bool add)
         bind.macs[multi ? 0 : 1] = htole32(IWX_FW_CMD_ID_AND_COLOR(kAwdlCoexMacId, 0));
         err = iwx_send_cmd_pdu_status(sc, IWX_BINDING_CONTEXT_CMD, sizeof(bind), &bind, &status);
         // A transport failure, unlike a refusal in the answer, doesn't say whether the binding exists.
-        const bool bindAmbiguous = err != 0;
+        // EWOULDBLOCK is not one of those either: the command never got a slot in the ring, so nothing was
+        // sent and nothing was bound.
+        const bool bindAmbiguous = err != 0 && err != EWOULDBLOCK;
         awdlCoexBindStatus = status;
         if (multi)
             awdlCoexMultiBindResult = err ? 0x80000000U | uint32_t(err) : (status ? 0x40000000U | status : 1);
@@ -17080,14 +17153,23 @@ awdlCoexListener(struct iwx_softc *sc, bool add)
             err = EIO;
         awdlCoexBindResult = err ? 0x80000000U | uint32_t(err) : 1;
         if (err) {
-            // Leave no context the binding doesn't know about. If that fails too, the firmware may still
-            // have it, so nothing is added again until the firmware restarts.
+            // Leave no context the binding doesn't know about: the MAC context did go in, so it is taken back
+            // out either way. Only a genuinely unknown state stops this generation -- a transport error, or a
+            // context that is still in and could not be removed by a command that itself got through. A ring
+            // that was merely full is left to the boot task's next beat.
+            const bool removed = gen == sc->sc_generation &&
+                awdlCoexMacSend(sc, IWX_FW_CTXT_ACTION_REMOVE) == 0;
             if (gen == sc->sc_generation &&
-                (awdlCoexMacSend(sc, IWX_FW_CTXT_ACTION_REMOVE) || bindAmbiguous) && gen == sc->sc_generation) {
+                (bindAmbiguous || (!removed && err != EWOULDBLOCK))) {
                 ++awdlCoexTeardownErrors;
                 awdlCoexBrokenGeneration = gen;
                 if (multi)
                     awdlCoexPhyUncertainGen = gen;
+            } else if (err == EWOULDBLOCK) {
+                // The ring was full on the way in; if it was full on the way out too, the context is still
+                // there and the next add has to clear it first.
+                awdlCoexMacStale = !removed;
+                awdlCoexMultiState = "bind-busy";
             }
             awdlCoexPublish();
             return err;
@@ -17148,8 +17230,11 @@ awdlCoexListener(struct iwx_softc *sc, bool add)
         }
         awdlCoexAdded = true;
         awdlCoexMultiActive = multi;
-        if (multi)
-            awdlCoexMultiState = "own-channel";
+        // A label either way. Without one in the station case the state stayed at the attach-time
+        // "not-added", so a listener bound on the station's PHY context read exactly like no listener at
+        // all -- measured on 2.5.10: Added Yes, Channel 153 (the AP's), MultiState not-added.
+        awdlCoexMultiState = multi ? "own-channel" : "station-bound";
+        awdlCoexMacStale = false;
 
         if (awdlCoexAdds) {
             if (awdlCoexLostToRestart)
@@ -17166,6 +17251,7 @@ awdlCoexListener(struct iwx_softc *sc, bool add)
             // Our frames name the channel we're on: the station's.
             awdlFixedChannel = awdlCoexChannel;
             awdlCoexTxSetupTried = 0;
+            awdlCoexTxSetupNextUS = 0;
         }
     } else {
         // Its station (and with it its queue) first, then the station's binding again, then the listener.
@@ -17240,6 +17326,10 @@ awdlCoexTxSetup(struct iwx_softc *sc)
     ++awdlCoexSetupAttempts;
     awdlCoexQueueStage = "not-tried";
     awdlCoexQueueAssigned = -1;
+    // Cleared per attempt: a number read here is this attempt's answer, never a stale one that makes the
+    // stage and the clash disagree.
+    awdlCoexQueueClash = "none";
+    awdlCoexQueueFwqid = 0;
     awdlCoexQueueWritePointer = 0xffffffffU;
     awdlCoexStaResult = 0;
     awdlCoexQueueResult = 0;
