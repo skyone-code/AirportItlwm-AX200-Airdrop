@@ -1,329 +1,374 @@
-// Decisions on outgoing HCI commands, kept free of kernel types for host tests.
+// What to do with outgoing HCI commands and incoming controller events. Kernel types stay out of
+// this file so the host test can drive every branch of it.
 #pragma once
 #include <stdint.h>
 #include <stddef.h>
 #include <string.h>
 namespace Ibtp {
+
+// ---- opcodes ---------------------------------------------------------------------------
+// Values as in Linux's include/net/bluetooth/hci.h. Two of them used to be wrong here, which sent
+// every park down a path bluetoothd never takes: the extended create is 0x2043, not 0x203a, and
+// bluetoothd only uses that form at all on BT 5 controllers.
 enum : uint16_t {
-    kOpReset = 0x0c03, kOpLeEventMask = 0x2001, kOpLeRandomAddress = 0x2005,
-    kOpSetRandomAddress = 0x2035, kOpExtAdvParams = 0x2036,
-    kOpRemoveSet = 0x203c, kOpClearSets = 0x203d,
-    kOpLeScanEnable = 0x200c, kOpLeCreateConn = 0x200d, kOpLeCreateConnCancel = 0x200e,
-    // Opcodes per Linux's include/net/bluetooth/hci.h; the extended create was previously
-    // mislabeled 0x203a here, which made every park miss — bluetoothd only sends the extended
-    // form on BT 5 controllers.
-    kOpLeExtCreateConn = 0x2043, kOpLeExtScanEnable = 0x2042,
-    kOpLeAdvEnable = 0x200a, kOpLeExtAdvEnable = 0x2039,
-    // Advertising payloads: legacy carries the data straight after the command length, the
-    // extended form adds set handle, fragment operation and preference first. Both matter for
-    // the Continuity witness — the Mac's 0x0D "Wi-Fi Settings" frame is the whole reason an
-    // iPhone offers its hotspot at all.
-    kOpLeAdvData = 0x2008, kOpLeExtAdvData = 0x2037,
-    kOpLeAdvParams = 0x2006, kOpLeAcceptListSize = 0x200f,
-    kOpLeAcceptListClear = 0x2010, kOpLeAcceptListAdd = 0x2011, kOpLeAcceptListRemove = 0x2012,
-    kOpLeConnUpdate = 0x2013, kOpLeResolvingAdd = 0x2027, kOpLeResolvingRemove = 0x2028,
-    kOpLeResolvingClear = 0x2029, kOpLeResolvingSize = 0x202d, kOpLeExtScanParams = 0x2038,
+    OpReset = 0x0c03,
+    OpLeEventMask = 0x2001,
+    OpLeReadLocalFeatures = 0x2003,
+    OpLeOwnRandomAddr = 0x2005,          // LE Set Random Address: the controller's own address
+    OpLeAdvParams = 0x2006,
+    OpLeAdvData = 0x2008,
+    OpLeAdvEnable = 0x200a,
+    OpLeScanParams = 0x200b,
+    OpLeScanEnable = 0x200c,
+    OpLeCreateConn = 0x200d,
+    OpLeCreateConnCancel = 0x200e,
+    OpLeAcceptListSize = 0x200f,
+    OpLeAcceptListClear = 0x2010,
+    OpLeAcceptListAdd = 0x2011,
+    OpLeAcceptListRemove = 0x2012,
+    OpLeConnUpdate = 0x2013,
+    OpLeReadRemoteFeatures = 0x2016,
+    OpLeResolvingAdd = 0x2027,
+    OpLeResolvingRemove = 0x2028,
+    OpLeResolvingClear = 0x2029,
+    OpLeResolvingSize = 0x202d,
+    OpLeAdvSetRandomAddr = 0x2035,       // LE Set Advertising Set Random Address: per set
+    OpLeExtAdvParams = 0x2036,
+    OpLeExtAdvData = 0x2037,
+    OpLeExtScanParams = 0x2038,
+    OpLeExtAdvEnable = 0x2039,
+    OpLeRemoveAdvSet = 0x203c,
+    OpLeClearAdvSets = 0x203d,
+    OpLeExtScanEnable = 0x2042,
+    OpLeExtCreateConn = 0x2043,
 };
-// Fingerprint of the connection path the host actually uses. The hot-spot failure comes down to
-// which mechanism bluetoothd picks to reach the phone, and the three candidates look identical
-// from the outside:
-//   - the phone's address is handed to the controller outright (filter policy 0),
-//   - the phone is put on the filter accept list and the controller matches it by address,
-//   - the phone is put on the resolving list and the controller matches its resolvable private
-//     address, which is the only one that works when the phone rotates its address every minute.
-// Each costs a reboot to distinguish, so one bitmask is collected and read once.
-enum : uint32_t {
-    kFpLegacyCreate = 1U << 0, kFpExtCreate = 1U << 1,
-    kFpAcceptListClear = 1U << 2, kFpAcceptListAdd = 1U << 3, kFpAcceptListRemove = 1U << 4,
-    kFpResolvingAdd = 1U << 5, kFpResolvingClear = 1U << 6, kFpResolvingSize = 1U << 7,
-    kFpAcceptListSize = 1U << 8, kFpExtAdvParams = 1U << 9, kFpExtAdvData = 1U << 10,
-    kFpExtAdvEnable = 1U << 11, kFpAdvParams = 1U << 12, kFpAdvEnable = 1U << 13,
-    kFpScanEnable = 1U << 14, kFpExtScanEnable = 1U << 15, kFpRandomAddress = 1U << 16,
-    kFpAdvSetRandomAddress = 1U << 17, kFpReadRemoteFeatures = 1U << 18,
-    kFpConnUpdate = 1U << 19, kFpCreateCancel = 1U << 20, kFpResolvingRemove = 1U << 21,
-    kFpExtScanParams = 1U << 22, kFpScanParams = 1U << 23,
+// What the controller reports back. The LE meta event wraps every subevent but the legacy ones.
+enum : uint8_t {
+    kEvtDisconnComplete = 0x05,
+    kEvtCmdComplete = 0x0e,
+    kEvtCmdStatus = 0x0f,
+    kEvtLeMeta = 0x3e,
+    kSubConnComplete = 0x01,
+    kSubAdvReport = 0x02,
+    kSubRemoteFeatures = 0x04,
+    kSubConnCompleteEnhanced = 0x0a,
+    kSubConnCompleteEnhancedV2 = 0x0b,
 };
-// Returns the bit for a command worth fingerprinting, or 0 for everything else.
-inline uint32_t opFingerprint(uint16_t op) {
-    switch (op) {
-    case kOpLeCreateConn: return kFpLegacyCreate;
-    case kOpLeExtCreateConn: return kFpExtCreate;
-    case kOpLeAcceptListClear: return kFpAcceptListClear;
-    case kOpLeAcceptListAdd: return kFpAcceptListAdd;
-    case kOpLeAcceptListRemove: return kFpAcceptListRemove;
-    case kOpLeResolvingAdd: return kFpResolvingAdd;
-    case kOpLeResolvingRemove: return kFpResolvingRemove;
-    case kOpLeResolvingClear: return kFpResolvingClear;
-    case kOpLeResolvingSize: return kFpResolvingSize;
-    case kOpLeAcceptListSize: return kFpAcceptListSize;
-    case kOpExtAdvParams: return kFpExtAdvParams;
-    case kOpLeExtAdvData: return kFpExtAdvData;
-    case kOpLeExtAdvEnable: return kFpExtAdvEnable;
-    case kOpLeAdvParams: return kFpAdvParams;
-    case kOpLeAdvEnable: return kFpAdvEnable;
-    case kOpLeScanEnable: return kFpScanEnable;
-    case kOpLeExtScanEnable: return kFpExtScanEnable;
-    case kOpLeRandomAddress: return kFpRandomAddress;
-    case kOpSetRandomAddress: return kFpAdvSetRandomAddress;
-    case kOpLeConnUpdate: return kFpConnUpdate;
-    case kOpLeCreateConnCancel: return kFpCreateCancel;
-    case 0x200b: return kFpScanParams;             // kOpLeScanParams, declared further down
-    case kOpLeExtScanParams: return kFpExtScanParams;
-    case 0x2016: return kFpReadRemoteFeatures;   // kOpLeReadRemoteFeatures, declared further down
-    default: return 0;
-    }
+inline uint16_t opcodeOf(const uint8_t *hci) { return uint16_t(hci[0] | hci[1] << 8); }
+// A 12-bit connection handle out of two event bytes; the top nibble carries flags.
+inline uint16_t connHandle(uint8_t low, uint8_t high) { return uint16_t((low | high << 8) & 0x0fff); }
+inline bool addressEquals(const uint8_t *a, const uint8_t *b) {
+    for (unsigned i = 0; i < 6; ++i)
+        if (a[i] != b[i])
+            return false;
+    return true;
 }
-// The original IntelBTPatcher (OpenIntelWireless/IntelBluetoothFirmware) sends this fixed
-// address before the first legacy scan, to work around a bluetoothd bug. Lilu panics if two
-// plugins hook the same function, so this kext took that job over and the original is not
-// loaded beside it. The address must never become an advertising address, because that would
-// make the Mac trackable.
-static const uint8_t kFixedPatcherAddress[6] = {0x94,0x50,0x64,0xd0,0x78,0x6b};
-// address is the general fallback: bluetoothd's LE random address, or until that arrives, the
-// last set address seen. setAddress is what bluetoothd chose for each set. scanEnable/
-// scanFilterDup mirror the last LE Set Scan Enable the host commanded.
-struct State {
-    uint8_t address[6]; bool haveAddress; bool haveGeneralAddress;
-    uint32_t addressedSets; bool legacyAddressSent;
-    uint8_t setAddress[32][6]; uint32_t knownSetAddresses;
-    uint8_t scanEnable, scanFilterDup;          // legacy LE Set Scan Enable (0x200c)
-    uint8_t extScanEnable, extScanFilterDup;    // extended LE Set Extended Scan Enable (0x2042)
-    bool legacyAdvEnabled;                      // legacy LE Set Advertising Enable (0x200a)
-    bool extAdvEnabled;                         // extended LE Set Extended Advertising Enable (0x2039)
+
+// ---- what the host has asked the controller for ----------------------------------------
+// Which route bluetoothd takes to reach a phone cannot be seen from the outside: it may hand the
+// address straight to the controller (filter policy 0), put the phone on the filter accept list, or
+// put it on the resolving list and let the controller match its resolvable private address - the
+// last one is the only route that survives the phone rotating its address every minute. Telling
+// them apart costs a reboot each, so one bitmask is collected per boot and read once.
+enum : uint32_t {
+    FpLegacyCreate = 1U << 0,
+    FpExtCreate = 1U << 1,
+    FpAcceptClear = 1U << 2,
+    FpAcceptAdd = 1U << 3,
+    FpAcceptRemove = 1U << 4,
+    FpResolvingAdd = 1U << 5,
+    FpResolvingClear = 1U << 6,
+    FpResolvingSize = 1U << 7,
+    FpAcceptSize = 1U << 8,
+    FpExtAdvParams = 1U << 9,
+    FpExtAdvData = 1U << 10,
+    FpExtAdvEnable = 1U << 11,
+    FpAdvParams = 1U << 12,
+    FpAdvEnable = 1U << 13,
+    FpScanEnable = 1U << 14,
+    FpExtScanEnable = 1U << 15,
+    FpOwnRandomAddr = 1U << 16,
+    FpAdvSetRandomAddr = 1U << 17,
+    FpRemoteFeatures = 1U << 18,
+    FpConnUpdate = 1U << 19,
+    FpCreateCancel = 1U << 20,
+    FpResolvingRemove = 1U << 21,
+    FpExtScanParams = 1U << 22,
+    FpScanParams = 1U << 23,
 };
-enum : uint16_t { kOpLeScanParams = 0x200b };
-// Written on the USB workloop when an attempt-ending event arrives, read on the caller's
-// thread when the next command goes out. Races are benign: a missed resume only leaves
-// scanning/advertising parked until bluetoothd's next round enables them itself.
-struct ScanResumeState {
-    bool suspended;        // a create attempt is parked the scanning/advertising we switched off
-    bool resumePending;    // the attempt ended; restore with the next command
-    bool watchdogFired;    // the restore was forced by the stall counter, not by an event
-    uint16_t pendingOpcode;  // the create opcode whose attempt is parked
-    uint32_t stallGuard;   // host commands seen since the park, for the watchdog
-    uint8_t enable, filterDup;        // legacy scan state to restore
-    uint8_t extEnable, extFilterDup;  // extended scan state to restore
-    bool parkedLegacyScan, parkedExtScan;    // what this park actually switched off
-    bool parkedLegacyAdv, parkedExtAdv;
-    // The last extended-advertising-enable packet, captured while mirroring the host and
-    // replayed verbatim to restore the sets after a parked create.
-    uint8_t extAdvReplay[72]; size_t extAdvReplayLength;
+struct OpBit { uint16_t opcode; uint32_t bit; };
+// Every opcode worth recording, one row each. 0x2038 and 0x200b must never collapse into one entry:
+// extended scan parameters and legacy scan parameters mean different things.
+static const OpBit kOpBits[] = {
+    {OpLeCreateConn, FpLegacyCreate},
+    {OpLeExtCreateConn, FpExtCreate},
+    {OpLeAcceptListClear, FpAcceptClear},
+    {OpLeAcceptListAdd, FpAcceptAdd},
+    {OpLeAcceptListRemove, FpAcceptRemove},
+    {OpLeResolvingAdd, FpResolvingAdd},
+    {OpLeResolvingRemove, FpResolvingRemove},
+    {OpLeResolvingClear, FpResolvingClear},
+    {OpLeResolvingSize, FpResolvingSize},
+    {OpLeAcceptListSize, FpAcceptSize},
+    {OpLeExtAdvParams, FpExtAdvParams},
+    {OpLeExtAdvData, FpExtAdvData},
+    {OpLeExtAdvEnable, FpExtAdvEnable},
+    {OpLeAdvParams, FpAdvParams},
+    {OpLeAdvEnable, FpAdvEnable},
+    {OpLeScanEnable, FpScanEnable},
+    {OpLeExtScanEnable, FpExtScanEnable},
+    {OpLeOwnRandomAddr, FpOwnRandomAddr},
+    {OpLeAdvSetRandomAddr, FpAdvSetRandomAddr},
+    {OpLeReadRemoteFeatures, FpRemoteFeatures},
+    {OpLeConnUpdate, FpConnUpdate},
+    {OpLeCreateConnCancel, FpCreateCancel},
+    {OpLeExtScanParams, FpExtScanParams},
+    {OpLeScanParams, FpScanParams},
 };
-// An LE Create Connection while scanning never forms on this controller (also the documented
-// Intel bug behind noble issue #165): the pending create is cancelled and bluetoothd times the
-// request out — that is the Instant Hotspot credential link (rapportd, Central role, 6 s fast
-// scan rounds then failure). bluetoothd on BT 5 controllers scans through the extended command
-// (0x2042), not the legacy one (0x200c), and connects through the extended create (0x2043);
-// both scan forms are parked with synthetic disables before a create goes out, and resumed
-// once the attempt ends (see ScanResumeState). The same treatment now applies to the
-// host's advertising sets: with host scanning parked and the create still failing on this
-// controller, the remaining concurrency is sharingd's always-on advertising (AirDrop
-// discovery) versus the create's own initiating scan — the parking here removes it too.
-// Returns how many pre-commands (0..4) must go out before the real one.
+// The bit for an opcode worth recording, 0 for everything else.
+inline uint32_t fingerprintOf(uint16_t op) {
+    for (const OpBit &entry : kOpBits)
+        if (entry.opcode == op)
+            return entry.bit;
+    return 0;
+}
+// The address IntelBTPatcher sends once before the first legacy scan, to work around a bluetoothd
+// bug. Lilu panics when two plugins hook the same function, so this kext took that job over and the
+// original is never loaded beside it. The address must never end up as an advertising address -
+// that would make the Mac trackable.
+static const uint8_t kLegacySeedAddress[6] = {0x94, 0x50, 0x64, 0xd0, 0x78, 0x6b};
+
+// ---- the host's state as far as this kext can see it -----------------------------------
+// ownAddress is the fallback for every set: bluetoothd's LE random address, or the last address
+// seen until that arrives. perSetAddress holds what bluetoothd chose for each set. scanOn/scanDup
+// and extScanOn/extScanDup mirror the last LE Scan Enable and LE Extended Scan Enable commands.
+struct Mirror {
+    uint8_t ownAddress[6];
+    bool hasOwnAddress;
+    bool ownFromController;         // ownAddress came from 0x2005, not from a set
+    uint32_t addressed;             // sets already given an address, bit per handle
+    bool seedSent;                  // the fixed legacy address has gone out
+    uint8_t perSetAddress[32][6];
+    uint32_t knownSets;             // sets whose address bluetoothd has named, bit per handle
+    uint8_t scanOn, scanDup;
+    uint8_t extScanOn, extScanDup;
+    bool advOn;
+    bool extAdvOn;
+};
+
+// ---- parking ---------------------------------------------------------------------------
+// A payload that has to go out before the host's own command, at most four of them.
+struct OutPacket {
+    uint8_t bytes[72];
+    size_t len;
+};
+// Builds a "turn it off" command: opcode, length byte, payload.
+inline OutPacket &buildPacket(OutPacket &c, uint16_t op, uint8_t first, uint8_t second, size_t len) {
+    c.bytes[0] = uint8_t(op & 0xff);
+    c.bytes[1] = uint8_t(op >> 8);
+    c.bytes[2] = uint8_t(len - 3);
+    c.bytes[3] = first;
+    if (len > 4)
+        c.bytes[4] = second;
+    c.len = len;
+    return c;
+}
+// An LE Create Connection issued while the controller is scanning never forms here - the same
+// documented Intel bug behind noble #165. The pending create gets cancelled and bluetoothd times
+// the request out; that is the Instant Hotspot credential link (rapportd, central role, 6 s of fast
+// scan rounds, then failure). bluetoothd scans through 0x2042 and connects through 0x2043 on BT 5,
+// so both scan forms are parked with synthetic disables before a create leaves and restored once
+// the attempt ends. The same applies to the host's advertising sets: sharingd advertises
+// continuously for AirDrop discovery, and that is the remaining concurrency.
 //
-// allowPark=false keeps this helper as a pure mirror (it still records every host scan/
-// advertising enable, it just never synthesises a disable). Parking is OFF by default since
-// 2.7.9: it was never observed to make a create succeed, while a field test showed it does
-// kill Instant Hotspot outright — the phone can only offer the password share if it can see
-// the Mac's advertising, and the park switched that advertising off (the Wi-Fi menu's
-// same-Apple-ID hotspot entry vanished with it).
-struct PreCommand { uint8_t data[72]; size_t length; };
-inline int wantsPreScanOff(State &s, ScanResumeState &r, const uint8_t *hci, size_t length,
-                           PreCommand *out, bool allowPark = true) {
+// Written on the command thread, read on the USB workloop when an attempt-ending event arrives; a
+// missed restore only leaves scanning and advertising off until bluetoothd's next round.
+struct Park {
+    bool parked;                    // an attempt is parked, and we switched something off
+    bool restorePending;            // the attempt ended; put it back with the next command
+    bool forcedByWatchdog;          // the stall counter forced the restore, no event did
+    uint16_t createOpcode;          // the create whose attempt is parked
+    uint32_t stalledFor;            // host commands seen since the park
+    uint8_t scanOn, scanDup;        // legacy scan state to put back
+    uint8_t extScanOn, extScanDup;  // extended scan state to put back
+    bool tookScan, tookExtScan;     // what this park actually switched off
+    bool tookAdv, tookExtAdv;
+    uint8_t advReplay[72];          // the last extended advertising enable, replayed verbatim
+    size_t advReplaySize;
+};
+// Mirrors every host scan/advertising enable and, when a connection attempt starts, hands back the
+// disables that park everything else. Returns how many packets go out first (0..4).
+//
+// allowPark=false keeps it a pure mirror: it still records every enable, it just never synthesises
+// a disable. Parking has been OFF by default since 2.7.9: it was never seen to make a create
+// succeed, and a field test showed it kills Instant Hotspot outright - the phone can only offer the
+// password share while it can see the Mac's advertising, and the park switched that off (the Wi-Fi
+// menu's same-Apple-ID entry vanished with it).
+inline int parkBeforeCreate(Mirror &m, Park &p, const uint8_t *hci, size_t length, OutPacket *out,
+                            bool allowPark = true) {
     if (!hci || length < 3)
         return 0;
-    const uint16_t op = uint16_t(hci[0] | hci[1] << 8);
-    if (op == kOpLeScanEnable) {
-        // The host re-asserted control over legacy scanning; forget any park we made.
-        if (length >= 5) {
-            s.scanFilterDup = hci[3];
-            s.scanEnable = hci[4];
-            if (r.suspended && s.scanEnable)
-                r.parkedLegacyScan = false;
+    switch (opcodeOf(hci)) {
+    case OpLeScanEnable:
+        // The host just re-asserted control over legacy scanning; forget any park of it.
+        if (length < 5)
+            return 0;
+        m.scanDup = hci[3];
+        m.scanOn = hci[4];
+        if (p.parked && m.scanOn)
+            p.tookScan = false;
+        return 0;
+    case OpLeExtScanEnable:
+        // Same for extended scanning; here the enable comes first and the filter policy second.
+        if (length < 5)
+            return 0;
+        m.extScanDup = hci[4];
+        m.extScanOn = hci[3];
+        if (p.parked && m.extScanOn)
+            p.tookExtScan = false;
+        return 0;
+    case OpLeAdvEnable:
+        if (length < 4)
+            return 0;
+        m.advOn = hci[3] != 0;
+        if (p.parked && m.advOn)
+            p.tookAdv = false;
+        return 0;
+    case OpLeExtAdvEnable:
+        if (length < 4)
+            return 0;
+        m.extAdvOn = hci[3] != 0;
+        if (m.extAdvOn && length <= sizeof(p.advReplay)) {
+            memcpy(p.advReplay, hci, length);
+            p.advReplaySize = length;
         }
+        if (p.parked && m.extAdvOn)
+            p.tookExtAdv = false;
+        return 0;
+    case OpLeCreateConn:
+    case OpLeExtCreateConn:
+        break;
+    default:
         return 0;
     }
-    if (op == kOpLeExtScanEnable) {
-        // Same for extended scanning. Params: enable, filter policy (2 octets when disabling).
-        if (length >= 5) {
-            s.extScanFilterDup = hci[4];
-            s.extScanEnable = hci[3];
-            if (r.suspended && s.extScanEnable)
-                r.parkedExtScan = false;
-        }
-        return 0;
-    }
-    if (op == kOpLeAdvEnable) {
-        if (length >= 4) {
-            s.legacyAdvEnabled = hci[3] != 0;
-            if (r.suspended && s.legacyAdvEnabled)
-                r.parkedLegacyAdv = false;
-        }
-        return 0;
-    }
-    if (op == kOpLeExtAdvEnable) {
-        if (length >= 4) {
-            s.extAdvEnabled = hci[3] != 0;
-            if (s.extAdvEnabled && length <= sizeof(r.extAdvReplay)) {
-                for (size_t i = 0; i < length; ++i)
-                    r.extAdvReplay[i] = hci[i];
-                r.extAdvReplayLength = length;
-            }
-            if (r.suspended && s.extAdvEnabled)
-                r.parkedExtAdv = false;
-        }
-        return 0;
-    }
-    if (op != kOpLeCreateConn && op != kOpLeExtCreateConn)
-        return 0;
     if (!allowPark)
         return 0;
-    r.pendingOpcode = op;
-    r.stallGuard = 0;
-    r.watchdogFired = false;
+    p.createOpcode = opcodeOf(hci);
+    p.stalledFor = 0;
+    p.forcedByWatchdog = false;
     int n = 0;
-    if (s.scanEnable) {
-        r.enable = s.scanEnable; r.filterDup = s.scanFilterDup;
-        s.scanEnable = 0;
-        PreCommand &c = out[n++];
-        c.data[0] = kOpLeScanEnable & 0xff; c.data[1] = kOpLeScanEnable >> 8; c.data[2] = 2;
-        c.data[3] = 0; c.data[4] = 0;  // filter duplicates off, scanning off
-        c.length = 5;
-        r.parkedLegacyScan = true;
+    if (m.scanOn) {
+        p.scanOn = m.scanOn;
+        p.scanDup = m.scanDup;
+        m.scanOn = 0;
+        buildPacket(out[n++], OpLeScanEnable, 0, 0, 5);       // filter duplicates off, scanning off
+        p.tookScan = true;
     }
-    if (s.extScanEnable) {
-        r.extEnable = s.extScanEnable; r.extFilterDup = s.extScanFilterDup;
-        s.extScanEnable = 0;
-        PreCommand &c = out[n++];
-        c.data[0] = kOpLeExtScanEnable & 0xff; c.data[1] = kOpLeExtScanEnable >> 8; c.data[2] = 2;
-        c.data[3] = 0; c.data[4] = 0;  // enable off, filter policy default (ignored when off)
-        c.length = 5;
-        r.parkedExtScan = true;
+    if (m.extScanOn) {
+        p.extScanOn = m.extScanOn;
+        p.extScanDup = m.extScanDup;
+        m.extScanOn = 0;
+        buildPacket(out[n++], OpLeExtScanEnable, 0, 0, 5);    // enable off, filter policy ignored
+        p.tookExtScan = true;
     }
-    if (s.legacyAdvEnabled) {
-        s.legacyAdvEnabled = 0;
-        PreCommand &c = out[n++];
-        c.data[0] = kOpLeAdvEnable & 0xff; c.data[1] = kOpLeAdvEnable >> 8; c.data[2] = 1;
-        c.data[3] = 0;  // advertising off
-        c.length = 4;
-        r.parkedLegacyAdv = true;
+    if (m.advOn) {
+        m.advOn = false;
+        buildPacket(out[n++], OpLeAdvEnable, 0, 0, 4);        // advertising off
+        p.tookAdv = true;
     }
-    if (s.extAdvEnabled) {
-        s.extAdvEnabled = 0;
-        PreCommand &c = out[n++];
-        c.data[0] = kOpLeExtAdvEnable & 0xff; c.data[1] = kOpLeExtAdvEnable >> 8; c.data[2] = 2;
-        c.data[3] = 0; c.data[4] = 0;  // enable off, zero sets
-        c.length = 5;
-        r.parkedExtAdv = true;
+    if (m.extAdvOn) {
+        m.extAdvOn = false;
+        buildPacket(out[n++], OpLeExtAdvEnable, 0, 0, 5);     // enable off, zero sets
+        p.tookExtAdv = true;
     }
     if (n)
-        r.suspended = true;
+        p.parked = true;
     return n;
 }
-// LE meta subevents that end a connection attempt (success or error status), and a plain
-// Disconnection Complete (event 0x05) for the legacy path. The LE meta event code (0x3e) is
-// also spelled here; the DataLength section below declares its own copy.
-// The command-level events close the loop the LE-meta events leave open: when the controller
-// eats the create (noble #165), it may answer Command Status (0x0f) with an error, or swallow
-// the attempt entirely — bluetoothd then cancels with LE Create Connection Cancel (0x200e)
-// after its 6 s timeout, and the cancel's Command Status/Complete arrive without any LE-meta
-// event. Without those, the parked scanning/advertising stayed off for good, which is what
-// made the Instant Hotspot password share spin forever until another join attempt kicked
-// bluetoothd into re-asserting the enables itself.
-enum : uint8_t { kScanEvtLeMeta = 0x3e, kScanEvtLeMetaConnComplete = 0x01, kScanEvtDisconnComplete = 0x05,
-                 kScanEvtLeMetaEnhancedConnComplete = 0x0a, kScanEvtLeMetaEnhancedConnCompleteV2 = 0x0b,
-                 kScanEvtCmdStatus = 0x0f, kScanEvtCmdComplete = 0x0e };
-// A parked attempt that outlives this many subsequent host commands without any ending event
-// is force-resumed. bluetoothd's own cancel path normally restores first (~6 s); this is the
-// belt-and-suspenders for an attempt whose every event the controller dropped.
-constexpr uint32_t kResumeStallCommands = 128;
-inline void onScanResumeEvent(ScanResumeState &s, const uint8_t *event, size_t length) {
-    if (!event || length < 3 || !s.suspended || s.resumePending)
+// A parked attempt that outlives this many host commands is force-restored. bluetoothd's own cancel
+// path normally gets there first (~6 s); this covers an attempt whose every event was dropped.
+constexpr uint32_t kStallLimit = 128;
+// Events that end a connection attempt: an LE meta connection complete, a plain disconnection, or a
+// command-level answer to the create. The command-level ones close a gap the LE meta events leave:
+// when the controller eats the create, it may answer Command Status with an error, or swallow the
+// attempt and leave bluetoothd cancelling (0x200e) after its 6 s timeout - that cancel's Command
+// Status/Complete arrives with no LE meta event at all. Without them, parked scanning and
+// advertising stayed off for good, which is what made the hotspot password share spin forever.
+inline void observeEndingEvent(Park &p, const uint8_t *event, size_t length) {
+    if (!event || length < 3 || !p.parked || p.restorePending)
         return;
-    bool attemptEnded = false;
-    if (event[0] == kScanEvtLeMeta)
-        attemptEnded = event[2] == kScanEvtLeMetaConnComplete ||
-                       event[2] == kScanEvtLeMetaEnhancedConnComplete ||
-                       event[2] == kScanEvtLeMetaEnhancedConnCompleteV2;
-    else if (event[0] == kScanEvtDisconnComplete)
-        attemptEnded = true;
-    else if (event[0] == kScanEvtCmdStatus && length >= 6) {
-        // Status(1) NumPackets(1) Opcode(2): status at [2], opcode at [4..5].
+    bool ended = false;
+    if (event[0] == kEvtLeMeta) {
+        ended = event[2] == kSubConnComplete || event[2] == kSubConnCompleteEnhanced ||
+                event[2] == kSubConnCompleteEnhancedV2;
+    } else if (event[0] == kEvtDisconnComplete) {
+        ended = true;
+    } else if (event[0] == kEvtCmdStatus && length >= 6) {
+        // status, numPackets, opcode: status at [2], opcode at [4..5].
         const uint16_t op = uint16_t(event[4] | event[5] << 8);
-        attemptEnded = (op == s.pendingOpcode && event[2] != 0) || op == kOpLeCreateConnCancel;
-    } else if (event[0] == kScanEvtCmdComplete && length >= 6) {
-        // NumPackets(1) Opcode(2) Status(1): opcode at [3..4], status at [5].
+        ended = (op == p.createOpcode && event[2] != 0) || op == OpLeCreateConnCancel;
+    } else if (event[0] == kEvtCmdComplete && length >= 6) {
+        // numPackets, opcode, status: opcode at [3..4], status at [5].
         const uint16_t op = uint16_t(event[3] | event[4] << 8);
-        attemptEnded = (op == s.pendingOpcode && event[5] != 0) || op == kOpLeCreateConnCancel;
+        ended = (op == p.createOpcode && event[5] != 0) || op == OpLeCreateConnCancel;
     }
-    if (attemptEnded)
-        s.resumePending = true;
+    if (ended)
+        p.restorePending = true;
 }
-// The pre-commands that bring scanning and advertising back after a parked create attempt;
-// returns how many (0..4), exactly the forms this park switched off. Called before
-// wantsPreScanOff, except for a create itself — resuming in front of a create would undo
-// the park.
-inline int wantsScanResume(ScanResumeState &s, PreCommand *out) {
-    if (!s.suspended)
+// The packets that bring back exactly what the park switched off (0..4). Called before
+// parkBeforeCreate for every command except a create itself - restoring in front of a create would
+// undo the park.
+inline int restoreAfterCreate(Park &p, OutPacket *out) {
+    if (!p.parked)
         return 0;
-    // Watchdog: count the host commands that pass while parked, and force the restore when an
-    // attempt-ending event never came. Legitimate attempts end via their cancel (~6 s) long
-    // before this; the counter only climbs for an attempt the controller dropped entirely.
-    if (!s.resumePending && ++s.stallGuard >= kResumeStallCommands)
-        s.resumePending = s.watchdogFired = true;
-    if (!s.resumePending)
+    // The counter only climbs while no ending event has arrived; a legitimate attempt cancels long
+    // before this, so a full counter means the controller dropped the attempt entirely.
+    if (!p.restorePending && ++p.stalledFor >= kStallLimit)
+        p.restorePending = p.forcedByWatchdog = true;
+    if (!p.restorePending)
         return 0;
-    s.resumePending = false;
-    s.suspended = false;
-    s.pendingOpcode = 0;
-    s.stallGuard = 0;
+    p.restorePending = false;
+    p.parked = false;
+    p.createOpcode = 0;
+    p.stalledFor = 0;
     int n = 0;
-    if (s.parkedLegacyScan) {
-        s.parkedLegacyScan = false;
-        PreCommand &c = out[n++];
-        c.data[0] = kOpLeScanEnable & 0xff; c.data[1] = kOpLeScanEnable >> 8; c.data[2] = 2;
-        c.data[3] = s.filterDup; c.data[4] = s.enable;
-        c.length = 5;
+    if (p.tookScan) {
+        p.tookScan = false;
+        buildPacket(out[n++], OpLeScanEnable, p.scanDup, p.scanOn, 5);
     }
-    if (s.parkedExtScan) {
-        s.parkedExtScan = false;
-        PreCommand &c = out[n++];
-        c.data[0] = kOpLeExtScanEnable & 0xff; c.data[1] = kOpLeExtScanEnable >> 8; c.data[2] = 2;
-        c.data[3] = s.extEnable; c.data[4] = s.extFilterDup;
-        c.length = 5;
+    if (p.tookExtScan) {
+        p.tookExtScan = false;
+        buildPacket(out[n++], OpLeExtScanEnable, p.extScanOn, p.extScanDup, 5);
     }
-    if (s.parkedLegacyAdv) {
-        s.parkedLegacyAdv = false;
-        PreCommand &c = out[n++];
-        c.data[0] = kOpLeAdvEnable & 0xff; c.data[1] = kOpLeAdvEnable >> 8; c.data[2] = 1;
-        c.data[3] = 1;
-        c.length = 4;
+    if (p.tookAdv) {
+        p.tookAdv = false;
+        buildPacket(out[n++], OpLeAdvEnable, 1, 0, 4);
     }
-    if (s.parkedExtAdv) {
-        s.parkedExtAdv = false;
-        PreCommand &c = out[n++];
-        for (size_t i = 0; i < s.extAdvReplayLength; ++i)
-            c.data[i] = s.extAdvReplay[i];
-        c.length = s.extAdvReplayLength;
+    if (p.tookExtAdv) {
+        p.tookExtAdv = false;
+        OutPacket &c = out[n++];
+        for (size_t i = 0; i < p.advReplaySize; ++i)
+            c.bytes[i] = p.advReplay[i];
+        c.len = p.advReplaySize;
     }
     return n;
 }
-// bluetoothd initiates connections with the duty cycle it uses for background discovery — its
-// own log line spells it out: "connection scan params: window - 0x30, interval - 0x1e0", i.e. a
-// 30 ms window every 300 ms, 10 % of the time. An iPhone advertises its Continuity data on the
-// order of a second or two, so a 10 % initiator misses most of those events inside the 6 s the
-// attempt is allowed to live; the rapport link that carries com.sharing.hotspot.request then
-// ends as "BLE client connect timeout". Widening the window to the interval makes the initiator
-// listen continuously for those few seconds. Only the create's own scan window is rewritten:
-// host scanning and advertising are left exactly as bluetoothd set them, which is what the
-// earlier pre-scan park got wrong. Returns true when the command was modified; *observed gets
-// the interval and window the host asked for (interval << 16 | window).
-inline bool widenCreateScan(uint8_t *hci, size_t length, uint32_t *observed) {
+
+// ---- the initiating scan window --------------------------------------------------------
+// bluetoothd initiates with the duty cycle it uses for background discovery; its own log says so:
+// "connection scan params: window - 0x30, interval - 0x1e0", a 30 ms window every 300 ms. An iPhone
+// advertises its Continuity data for a second or two at a time, so a 10 % initiator misses most of
+// it inside the 6 s an attempt lives, and the rapport link carrying com.sharing.hotspot.request ends
+// as "BLE client connect timeout". Widening the window to the interval makes the initiator listen
+// continuously for those seconds. Only the create's own window is rewritten - host scanning and
+// advertising stay exactly as bluetoothd set them, which is what the earlier pre-scan park got
+// wrong. Returns true when the command changed; *observed gets interval << 16 | window.
+inline bool widenInitiatorScan(uint8_t *hci, size_t length, uint32_t *observed) {
     if (!hci || length < 4)
         return false;
-    const uint16_t op = uint16_t(hci[0] | hci[1] << 8);
-    if (op == kOpLeCreateConn) {
-        // Scan_Interval then Scan_Window are the first fields of the payload.
+    const uint16_t op = opcodeOf(hci);
+    if (op == OpLeCreateConn) {
+        // Scan_Interval then Scan_Window, at the head of the payload.
         if (length < 7)
             return false;
         const uint16_t interval = uint16_t(hci[3] | hci[4] << 8), window = uint16_t(hci[5] | hci[6] << 8);
@@ -335,11 +380,10 @@ inline bool widenCreateScan(uint8_t *hci, size_t length, uint32_t *observed) {
         hci[6] = uint8_t(interval >> 8);
         return true;
     }
-    if (op != kOpLeExtCreateConn)
+    if (op != OpLeExtCreateConn)
         return false;
-    // Filter policy, own address type, peer address type and address, then the initiating PHYs;
-    // each supported PHY contributes fourteen bytes (Scan_Interval, Scan_Window and the
-    // connection parameters), starting with its own scan pair.
+    // Filter policy, own address type, peer address type and address, then the PHY mask; every
+    // supported PHY adds fourteen bytes that start with its own scan interval/window pair.
     if (length < 17)
         return false;
     const uint8_t phys = hci[12];
@@ -363,264 +407,271 @@ inline bool widenCreateScan(uint8_t *hci, size_t length, uint32_t *observed) {
     return changed;
 }
 
-// True once per controller start, before the first legacy scan parameters command.
-inline bool wantsLegacyScanAddress(State &s, const uint8_t *hci, size_t length) {
-    if (!hci || length < 3 || uint16_t(hci[0] | hci[1] << 8) != kOpLeScanParams || s.legacyAddressSent)
+// True once per controller start, just before the first legacy scan parameters command.
+inline bool shouldSeedLegacyAddress(Mirror &m, const uint8_t *hci, size_t length) {
+    if (!hci || length < 3 || opcodeOf(hci) != OpLeScanParams || m.seedSent)
         return false;
-    s.legacyAddressSent = true;
+    m.seedSent = true;
     return true;
 }
-struct Action { bool sendSetAddress, sendEventMask; uint8_t output[11]; size_t outputLength; };
-inline bool same(const uint8_t *a, const uint8_t *b) {
-    for (unsigned i = 0; i < 6; ++i) if (a[i] != b[i]) return false;
-    return true;
-}
-// hci is the whole command, opcode first. Call this for every outgoing command. The returned
-// action must be sent after the command itself, since a set exists only after 0x2036.
-inline Action onCommand(State &s, const uint8_t *hci, size_t length, bool extendedScanning) {
-    Action a{};
-    if (!hci || length < 3) return a;
-    const uint16_t op = uint16_t(hci[0] | hci[1] << 8);
-    switch (op) {
-    case kOpReset:
-        s = State{};
+
+// ---- commands that have to follow the host's own ---------------------------------------
+// What to send after the host's command was accepted, and whether anything is to be sent at all.
+struct FollowUp {
+    bool setAddress;
+    bool eventMask;
+    uint8_t bytes[11];
+    size_t len;
+};
+// Call for every outgoing command; hci starts at the opcode. A set only exists after 0x2036, so
+// whatever this asks for has to go out after the command itself.
+inline FollowUp mirrorCommand(Mirror &m, const uint8_t *hci, size_t length, bool extendedScanning) {
+    FollowUp f {};
+    if (!hci || length < 3)
+        return f;
+    switch (opcodeOf(hci)) {
+    case OpReset:
+        m = Mirror{};
         break;
-    case kOpLeRandomAddress:
-        if (length >= 9 && !same(hci + 3, kFixedPatcherAddress)) {
-            for (unsigned i = 0; i < 6; ++i) s.address[i] = hci[3 + i];
-            s.haveAddress = true;
-            s.haveGeneralAddress = true;
+    case OpLeOwnRandomAddr:
+        if (length >= 9 && !addressEquals(hci + 3, kLegacySeedAddress)) {
+            for (unsigned i = 0; i < 6; ++i)
+                m.ownAddress[i] = hci[3 + i];
+            m.hasOwnAddress = true;
+            m.ownFromController = true;
         }
         break;
-    case kOpSetRandomAddress:
-        // bluetoothd's address for this set. It's rejected if the set doesn't exist yet, so
-        // this doesn't count as the set having one, but it's kept for when the set is created.
-        if (length >= 10 && !same(hci + 4, kFixedPatcherAddress)) {
+    case OpLeAdvSetRandomAddr:
+        // bluetoothd's address for this set. It is rejected while the set does not exist yet, so
+        // this is not proof the set has one - it is kept for when the set is created.
+        if (length >= 10 && !addressEquals(hci + 4, kLegacySeedAddress)) {
             if (hci[3] < 32) {
-                for (unsigned i = 0; i < 6; ++i) s.setAddress[hci[3]][i] = hci[4 + i];
-                s.knownSetAddresses |= 1U << hci[3];
+                for (unsigned i = 0; i < 6; ++i)
+                    m.perSetAddress[hci[3]][i] = hci[4 + i];
+                m.knownSets |= 1U << hci[3];
             }
-            if (!s.haveGeneralAddress) {
-                for (unsigned i = 0; i < 6; ++i) s.address[i] = hci[4 + i];
-                s.haveAddress = true;
+            if (!m.ownFromController) {
+                for (unsigned i = 0; i < 6; ++i)
+                    m.ownAddress[i] = hci[4 + i];
+                m.hasOwnAddress = true;
             }
         }
         break;
-    case kOpExtAdvParams:
-        // Handle at parameter 0, Own_Address_Type at parameter 10.
-        if (length >= 14 && hci[13] == 1 && hci[3] < 32 && !(s.addressedSets & (1U << hci[3])) &&
-            (s.haveAddress || (s.knownSetAddresses & (1U << hci[3])))) {
-            const uint8_t *chosen = (s.knownSetAddresses & (1U << hci[3])) ? s.setAddress[hci[3]] : s.address;
-            s.addressedSets |= 1U << hci[3];
-            a.sendSetAddress = true;
-            a.output[0] = kOpSetRandomAddress & 0xff; a.output[1] = kOpSetRandomAddress >> 8; a.output[2] = 7;
-            a.output[3] = hci[3];
-            for (unsigned i = 0; i < 6; ++i) a.output[4 + i] = chosen[i];
-            a.outputLength = 10;
+    case OpLeExtAdvParams:
+        // Handle at parameter 0, own address type at parameter 10.
+        if (length >= 14 && hci[13] == 1 && hci[3] < 32 && !(m.addressed & (1U << hci[3])) &&
+            (m.hasOwnAddress || (m.knownSets & (1U << hci[3])))) {
+            const uint8_t *chosen = (m.knownSets & (1U << hci[3])) ? m.perSetAddress[hci[3]] : m.ownAddress;
+            m.addressed |= 1U << hci[3];
+            f.setAddress = true;
+            f.bytes[0] = OpLeAdvSetRandomAddr & 0xff;
+            f.bytes[1] = OpLeAdvSetRandomAddr >> 8;
+            f.bytes[2] = 7;
+            f.bytes[3] = hci[3];
+            for (unsigned i = 0; i < 6; ++i)
+                f.bytes[4 + i] = chosen[i];
+            f.len = 10;
         }
         break;
-    case kOpRemoveSet:
-        // A removed set forgets its address too: a set made later with the same handle must not be
-        // given an address from before bluetoothd rotated it.
+    case OpLeRemoveAdvSet:
+        // A removed set forgets its address too, or a set later created on the same handle would
+        // inherit one bluetoothd has already rotated away from.
         if (length >= 4 && hci[3] < 32) {
-            s.addressedSets &= ~(1U << hci[3]);
-            s.knownSetAddresses &= ~(1U << hci[3]);
-            for (unsigned i = 0; i < 6; ++i) s.setAddress[hci[3]][i] = 0;
+            m.addressed &= ~(1U << hci[3]);
+            m.knownSets &= ~(1U << hci[3]);
+            for (unsigned i = 0; i < 6; ++i)
+                m.perSetAddress[hci[3]][i] = 0;
         }
         break;
-    case kOpClearSets:
-        s.addressedSets = 0;
-        s.knownSetAddresses = 0;
-        for (auto &address : s.setAddress)
-            for (unsigned i = 0; i < 6; ++i) address[i] = 0;
+    case OpLeClearAdvSets:
+        m.addressed = 0;
+        m.knownSets = 0;
+        for (auto &address : m.perSetAddress)
+            for (unsigned i = 0; i < 6; ++i)
+                address[i] = 0;
         break;
-    case kOpLeEventMask:
-        // Extended scanning reports are bit 12, which bluetoothd leaves off for this chip.
+    case OpLeEventMask:
+        // Bit 12 is the extended scanning report, and bluetoothd leaves it off for this chip.
         if (extendedScanning && length >= 11 && !(hci[4] & 0x10)) {
-            a.sendEventMask = true;
-            for (unsigned i = 0; i < 11; ++i) a.output[i] = hci[i];
-            a.output[4] |= 0x10;
-            a.outputLength = 11;
+            f.eventMask = true;
+            for (unsigned i = 0; i < 11; ++i)
+                f.bytes[i] = hci[i];
+            f.bytes[4] |= 0x10;
+            f.len = 11;
         }
         break;
     default:
         break;
     }
-    return a;
+    return f;
 }
-// Intel Bluetooth controllers never send an LE Data Length Change event on Tahoe, so bluetoothd
-// stays at LE_READY_WAIT_FOR_LENGTH after the link encrypts and a new BLE HID device (a mouse, a
-// keyboard) never binds: "No database exists". Already bonded devices skip GATT discovery, which
-// is why they still work. IntelBTPatcher's fix is to send LE Read Remote Features twice more and
-// rewrite the two duplicate completions into the events bluetoothd is waiting for. Lilu panics if
-// two plugins hook the same function, so with this kext active that job is here instead.
-// OpenIntelWireless/IntelBluetoothFirmware#514.
-enum : uint16_t { kOpLeReadRemoteFeatures = 0x2016 };
-enum : uint8_t { kEvtLeMeta = 0x3e, kLeMetaReadRemoteFeaturesComplete = 0x04 };
-// The link is up and encrypted when this runs, so the two events describe that link: the handle
-// comes from the completion being replaced. Values are IntelBTPatcher's: 27 octets, 328 us.
-enum : size_t { kPhyUpdateEventLength = 8, kDataLengthEventLength = 13 };
-// The duplicates are tracked per connection handle: with one shared stage, a second link reading
-// remote features while the first link's duplicates were pending reset the stage, and the fake events
-// could carry the wrong handle. An entry that gets no events (a controller may answer a duplicate
-// with a Command Status error only) expires after kDataLengthExpiryNs, so nothing waits forever.
-enum : unsigned { kDataLengthLinks = 8 };
-// At most this many interrupt reads are wrapped per round, whatever else happens: a round that never
-// matches must not keep every read of the controller's event pipe wrapped until it expires, which
-// left USB devices unresponsive until a cold boot.
-enum : uint32_t { kMaxWrappedReads = 24 };
-enum : uint64_t { kDataLengthExpiryNs = 2000000000ULL };
-struct DataLengthLink {
-    uint16_t handle;       // 12-bit connection handle
-    uint8_t stage;         // 0: the real completion, 1: fake PHY update, 2: fake data length
-    uint8_t outstanding;   // duplicates whose completion hasn't been rewritten yet; 0 = free slot
-    uint64_t armedNs;      // when the duplicates were sent
+
+// ---- LE Data Length Change -----------------------------------------------------------------
+// Intel controllers never send an LE Data Length Change event on Tahoe, so bluetoothd sits at
+// LE_READY_WAIT_FOR_LENGTH once the link encrypts and a new BLE HID device never binds ("No
+// database exists"). Already bonded devices skip GATT discovery, which is why they still work. The
+// fix is to send LE Read Remote Features twice more and rewrite the two duplicate completions into
+// the events bluetoothd is waiting for. Lilu panics on a double hook, so with this kext loaded that
+// job is here. OpenIntelWireless/IntelBluetoothFirmware#514.
+//
+// The link is up and encrypted here, so both events describe that link: the handle comes from the
+// completion being replaced. 27 octets at 328 us, as upstream sends them.
+enum : size_t { kPhyUpdateLen = 8, kDataLengthLen = 13 };
+// Duplicates are tracked per connection handle. A single shared stage let a second link reset the
+// first one's round, and the fake events could carry the wrong handle.
+enum : unsigned { kFeatureSlots = 8 };
+// At most this many reads are wrapped per round: a round that never matches must not keep wrapping
+// every read of the event pipe, which left USB devices unresponsive until a cold boot.
+enum : uint32_t { kWrapBudget = 24 };
+enum : uint64_t { kRoundExpiryNs = 2000000000ULL };
+struct FeatureSlot {
+    uint16_t handle;    // 12-bit connection handle
+    uint8_t stage;      // 0: the real completion, 1: fake PHY update, 2: fake data length
+    uint8_t left;       // duplicates still to be rewritten; 0 means the slot is free
+    uint64_t armedNs;
 };
-struct DataLengthState {
-    DataLengthLink links[kDataLengthLinks];
-    uint32_t expired;      // entries given up after kDataLengthExpiryNs
-    uint32_t aborts;       // rounds dropped because nothing could be rewritten into a read
-    uint32_t wrapped;      // reads wrapped since the last round was armed
+struct FeatureBoard {
+    FeatureSlot slots[kFeatureSlots];
+    uint32_t expired;   // rounds given up after kRoundExpiryNs
+    uint32_t aborts;    // rounds dropped because nothing could be rewritten into a read
+    uint32_t wrapped;   // reads wrapped since the last round was armed
 };
-inline uint16_t dataLengthHandle(uint8_t low, uint8_t high) { return uint16_t((low | high << 8) & 0x0fff); }
-inline DataLengthLink *findLink(DataLengthState &s, uint16_t handle) {
-    for (auto &l : s.links)
-        if (l.outstanding && l.handle == handle)
-            return &l;
+inline FeatureSlot *findSlot(FeatureBoard &b, uint16_t handle) {
+    for (auto &slot : b.slots)
+        if (slot.left && slot.handle == handle)
+            return &slot;
     return nullptr;
 }
-// Frees the entries older than the expiry. Returns whether any entry is still waiting.
-inline bool expireLinks(DataLengthState &s, uint64_t nowNs) {
+// Gives up the slots older than the expiry. Returns whether anything is still waiting.
+inline bool sweepSlots(FeatureBoard &b, uint64_t nowNs) {
     bool waiting = false;
-    for (auto &l : s.links) {
-        if (!l.outstanding)
+    for (auto &slot : b.slots) {
+        if (!slot.left)
             continue;
-        if (nowNs - l.armedNs > kDataLengthExpiryNs) {
-            l = DataLengthLink{};
-            ++s.expired;
+        if (nowNs - slot.armedNs > kRoundExpiryNs) {
+            slot = FeatureSlot{};
+            ++b.expired;
         } else {
             waiting = true;
         }
     }
     return waiting;
 }
-// Drops every pending link, keeping the counters: used when a read can't be rewritten (a failed
-// transfer, no hold of our own on the buffer, a short write). Which link it belonged to can't be
-// known without reading it, and a dropped round only leaves bluetoothd on the timeout it already had.
-inline void abortLinks(DataLengthState &s) {
-    for (auto &l : s.links)
-        l = DataLengthLink{};
-    ++s.aborts;
+// Drops every pending slot but keeps the counters: used when a read cannot be rewritten (failed
+// transfer, no hold of our own, short write). Which link it belonged to cannot be known without
+// reading it, and a dropped round only leaves bluetoothd on the timeout it already had.
+inline void dropRound(FeatureBoard &b) {
+    for (auto &slot : b.slots)
+        slot = FeatureSlot{};
+    ++b.aborts;
 }
-inline bool dataLengthPending(const DataLengthState &s) {
-    for (auto &l : s.links)
-        if (l.outstanding)
+inline bool roundPending(const FeatureBoard &b) {
+    for (auto &slot : b.slots)
+        if (slot.left)
             return true;
     return false;
 }
-// How many copies of this command to send after it. Only LE Read Remote Features with its handle, and
-// a controller start forgets every command still in flight. With every slot busy, no copies are sent:
-// that link then behaves as it would without this fix.
-inline unsigned extraRemoteReads(DataLengthState &s, const uint8_t *hci, size_t length, uint64_t nowNs) {
+// How many copies of this command to send after it. Only LE Read Remote Features with a handle
+// qualifies, and a controller start forgets every command still in flight. With every slot taken no
+// copy is sent, so that link behaves as it would without this fix.
+inline unsigned duplicateReads(FeatureBoard &b, const uint8_t *hci, size_t length, uint64_t nowNs) {
     if (!hci || length < 3)
         return 0;
-    const uint16_t op = uint16_t(hci[0] | hci[1] << 8);
-    if (op == kOpReset) {
-        const uint32_t expired = s.expired, aborts = s.aborts;
-        s = DataLengthState{};
-        s.expired = expired;
-        s.aborts = aborts;
+    const uint16_t op = opcodeOf(hci);
+    if (op == OpReset) {
+        const uint32_t expired = b.expired, aborts = b.aborts;
+        b = FeatureBoard{};
+        b.expired = expired;
+        b.aborts = aborts;
         return 0;
     }
-    if (op != kOpLeReadRemoteFeatures || length < 5 || hci[2] < 2)
+    if (op != OpLeReadRemoteFeatures || length < 5 || hci[2] < 2)
         return 0;
-    expireLinks(s, nowNs);
-    const uint16_t handle = dataLengthHandle(hci[3], hci[4]);
-    DataLengthLink *l = findLink(s, handle);
-    if (!l) {
-        for (auto &free : s.links)
-            if (!free.outstanding) {
-                l = &free;
+    sweepSlots(b, nowNs);
+    const uint16_t handle = connHandle(hci[3], hci[4]);
+    FeatureSlot *slot = findSlot(b, handle);
+    if (!slot) {
+        for (auto &free : b.slots)
+            if (!free.left) {
+                slot = &free;
                 break;
             }
-        if (!l)
+        if (!slot)
             return 0;
     }
-    // A repeated read on the same link starts over: its earlier duplicates are folded into this one.
-    l->handle = handle;
-    l->stage = 0;
-    l->outstanding = 2;
-    l->armedNs = nowNs;
-    s.wrapped = 0;   // a new round starts with a full budget of wrapped reads
+    // A repeated read on the same link starts over and folds the earlier duplicates into it.
+    slot->handle = handle;
+    slot->stage = 0;
+    slot->left = 2;
+    slot->armedNs = nowNs;
+    b.wrapped = 0;      // a new round gets a full wrap budget
     return 2;
 }
 // Whether to wrap an interrupt read: something is waiting, the buffer can hold the longest rewritten
-// event, and the round's budget isn't spent. A spent budget drops the round.
-inline bool wrapRead(DataLengthState &s, uint64_t nowNs, size_t bufferLength) {
-    if (!expireLinks(s, nowNs) || bufferLength < kDataLengthEventLength)
+// event, and the round's budget is not spent. A spent budget drops the round.
+inline bool takeWrap(FeatureBoard &b, uint64_t nowNs, size_t bufferLength) {
+    if (!sweepSlots(b, nowNs) || bufferLength < kDataLengthLen)
         return false;
-    if (s.wrapped >= kMaxWrappedReads) {
-        abortLinks(s);
+    if (b.wrapped >= kWrapBudget) {
+        dropRound(b);
         return false;
     }
-    ++s.wrapped;
+    ++b.wrapped;
     return true;
 }
-// A copy that couldn't be sent never produces an event, so it's not waited for.
-inline void forgetRemoteRead(DataLengthState &s, const uint8_t *hci, size_t length) {
+// A copy that could not be sent never produces an event, so nothing waits for it.
+inline void dropDuplicate(FeatureBoard &b, const uint8_t *hci, size_t length) {
     if (!hci || length < 5)
         return;
-    DataLengthLink *l = findLink(s, dataLengthHandle(hci[3], hci[4]));
-    if (l && !--l->outstanding)
-        *l = DataLengthLink{};
+    FeatureSlot *slot = findSlot(b, connHandle(hci[3], hci[4]));
+    if (slot && !--slot->left)
+        *slot = FeatureSlot{};
 }
-// Rewrites one incoming event in place and returns its new size. Everything except a duplicate
-// LE Read Remote Features Complete for a link that is waiting passes through untouched; the first of
-// that link's two duplicates becomes PHY Update Complete, the second LE Data Length Change, as in
-// IntelBTPatcher.
-inline size_t rewriteEvent(DataLengthState &s, uint8_t *event, size_t length) {
-    if (!event || length < 6 || event[0] != kEvtLeMeta || event[2] != kLeMetaReadRemoteFeaturesComplete)
+// Rewrites one incoming event in place and returns its new size. Everything except a duplicate LE
+// Read Remote Features Complete for a waiting link passes through untouched: the first of that
+// link's two duplicates becomes PHY Update Complete, the second LE Data Length Change.
+inline size_t forgeEvent(FeatureBoard &b, uint8_t *event, size_t length) {
+    if (!event || length < 6 || event[0] != kEvtLeMeta || event[2] != kSubRemoteFeatures)
         return length;
     const uint8_t handleLow = event[4], handleHigh = event[5];
-    DataLengthLink *l = findLink(s, dataLengthHandle(handleLow, handleHigh));
-    if (!l)
+    FeatureSlot *slot = findSlot(b, connHandle(handleLow, handleHigh));
+    if (!slot)
         return length;
-    if (l->stage == 0) {  // the real completion goes to bluetoothd as it is
-        l->stage = 1;
+    if (slot->stage == 0) {     // the real completion goes to bluetoothd as it is
+        slot->stage = 1;
         return length;
     }
-    // Status 0, both directions 2M.
-    if (l->stage == 1) {
-        const uint8_t fake[kPhyUpdateEventLength] = {kEvtLeMeta, 6, 0x0c, 0x00, handleLow, handleHigh, 0x02, 0x02};
-        for (unsigned i = 0; i < kPhyUpdateEventLength; ++i)
+    if (slot->stage == 1) {
+        // Status 0, both directions 2M.
+        const uint8_t fake[kPhyUpdateLen] = {kEvtLeMeta, 6, 0x0c, 0x00, handleLow, handleHigh, 0x02, 0x02};
+        for (unsigned i = 0; i < kPhyUpdateLen; ++i)
             event[i] = fake[i];
-        l->stage = 2;
-        if (!--l->outstanding)
-            *l = DataLengthLink{};
-        return kPhyUpdateEventLength;
+        slot->stage = 2;
+        if (!--slot->left)
+            *slot = FeatureSlot{};
+        return kPhyUpdateLen;
     }
     // A Data Length Change has no status byte, so the handle moves to parameter 0.
-    const uint8_t fake[kDataLengthEventLength] = {kEvtLeMeta, 11, 0x07, handleLow, handleHigh,
-                                                  0x1b, 0x00, 0x48, 0x01, 0x1b, 0x00, 0x48, 0x01};
-    for (unsigned i = 0; i < kDataLengthEventLength; ++i)
+    const uint8_t fake[kDataLengthLen] = {kEvtLeMeta, 11, 0x07, handleLow, handleHigh,
+                                          0x1b, 0x00, 0x48, 0x01, 0x1b, 0x00, 0x48, 0x01};
+    for (unsigned i = 0; i < kDataLengthLen; ++i)
         event[i] = fake[i];
-    *l = DataLengthLink{};
-    return kDataLengthEventLength;
+    *slot = FeatureSlot{};
+    return kDataLengthLen;
 }
 
-// ---- Continuity broadcast witness -------------------------------------------------------
-// Both halves of Instant Hotspot discovery exist only on the air, so the HCI layer is the one
-// honest place to see them: the Mac broadcasts a 0x0D "Wi-Fi Settings" frame carrying a
-// 4-byte iCloud-derived id to ask for a hotspot, and a phone signed into the same account
-// answers with 0x0E only after matching that id. If the Mac never transmits 0x0D, no menu
-// entry can appear and no amount of connection tuning will help; if 0x0E arrives but its
-// report is not connectable, no create can ever land. Both are parsed here so a host test can
-// drive the edges.
+// ---- Continuity over the air --------------------------------------------------------------
+// Both halves of Instant Hotspot discovery exist only on the air, so the HCI layer is the one honest
+// place to look: the Mac broadcasts a 0x0D "Wi-Fi Settings" frame carrying a 4-byte iCloud-derived
+// id to ask for a hotspot, and a phone signed into the same account answers with 0x0E only after
+// matching that id. If the Mac never transmits 0x0D no menu entry can appear, and no amount of
+// connection tuning helps; if 0x0E arrives with a report that is not connectable, no create can
+// land. Both are parsed here so a host test can drive the edges.
 
-// Walks the AD structures of one payload and ORs every Apple Continuity type id into mask.
-// Returns the last type byte seen, or 0xff when the payload carried no Apple manufacturer
-// data. Length-prefixed walk: a truncated or alien payload stops rather than runs off.
-inline uint8_t continuityTypes(const uint8_t *data, size_t length, uint32_t *mask) {
+// Walks the AD structures of one payload and ORs every Apple Continuity type id into mask. Returns
+// the last type byte seen, or 0xff when the payload carried no Apple manufacturer data. The walk is
+// length-prefixed, so a truncated or alien payload stops instead of running off.
+inline uint8_t appleTypeIds(const uint8_t *data, size_t length, uint32_t *mask) {
     uint8_t last = 0xff;
     if (!data)
         return last;
@@ -638,25 +689,28 @@ inline uint8_t continuityTypes(const uint8_t *data, size_t length, uint32_t *mas
     }
     return last;
 }
-// Where the advertising payload sits inside an LE Set [Extended] Advertising Data command.
-// Legacy: command length then data. Extended: set handle, fragment operation, fragment
-// preference, data length, then data.
-struct AdvPayload { size_t offset, length; };
-inline bool advPayload(const uint8_t *hci, size_t length, AdvPayload *out) {
+// Where the advertising payload sits inside an LE Set [Extended] Advertising Data command. Legacy:
+// command length, then the data. Extended: set handle, fragment operation, fragment preference,
+// data length, then the data.
+struct PayloadRange {
+    size_t offset, length;
+};
+inline bool payloadRange(const uint8_t *hci, size_t length, PayloadRange *out) {
     if (!hci || length < 5 || !out)
         return false;
-    const uint16_t op = uint16_t(hci[0] | hci[1] << 8);
+    const uint16_t op = opcodeOf(hci);
     size_t offset, dataLength;
-    if (op == kOpLeAdvData) {
+    if (op == OpLeAdvData) {
         offset = 3;
         dataLength = hci[2];
-    } else if (op == kOpLeExtAdvData) {
+    } else if (op == OpLeExtAdvData) {
         if (length < 8)
             return false;
         offset = 7;
         dataLength = hci[6];
-    } else
+    } else {
         return false;
+    }
     if (offset >= length)
         return false;
     if (offset + dataLength > length)
@@ -665,14 +719,16 @@ inline bool advPayload(const uint8_t *hci, size_t length, AdvPayload *out) {
     out->length = dataLength;
     return dataLength > 0;
 }
-// One advertising report out of an LE Meta Event 0x02. The event type byte is the fact that
-// decides whether a create can succeed: only a connectable report lets the controller answer
-// with CONNECT_IND. 0x00 ADV_IND / 0x01 ADV_DIRECT_IND are connectable, 0x02 ADV_SCAN_IND and
-// 0x03 ADV_NONCONN_IND are not, and the extended forms 0x0d-0x13 carry a connectable bit that
-// the caller reads from the high nibble of the type's own encoding (kept verbatim here).
-struct AdvReportItem { uint8_t eventType, addr[6], rssi; uint32_t appleTypes; };
-inline int advReportItems(const uint8_t *event, size_t size, AdvReportItem *out, int max) {
-    if (!event || !out || max <= 0 || size < 6 || event[0] != 0x3e || event[2] != 0x02)
+// One advertising report out of an LE Meta Event 0x02. The event type byte is the fact that decides
+// whether a create can succeed, because only a connectable report lets the controller answer with
+// CONNECT_IND: 0x00 ADV_IND and 0x01 ADV_DIRECT_IND are connectable, 0x02 ADV_SCAN_IND and 0x03
+// ADV_NONCONN_IND are not, and the extended forms 0x0d-0x13 carry the bit in their own encoding.
+struct Report {
+    uint8_t eventType, addr[6], rssi;
+    uint32_t appleTypes;
+};
+inline int parseReports(const uint8_t *event, size_t size, Report *out, int max) {
+    if (!event || !out || max <= 0 || size < 6 || event[0] != kEvtLeMeta || event[2] != kSubAdvReport)
         return 0;
     const uint8_t count = event[3];
     size_t offset = 4;
@@ -681,12 +737,12 @@ inline int advReportItems(const uint8_t *event, size_t size, AdvReportItem *out,
         const size_t dataLength = event[offset + 8];
         if (offset + 9 + dataLength + 1 > size)
             break;
-        AdvReportItem &item = out[items++];
+        Report &item = out[items++];
         item.eventType = event[offset];
         memcpy(item.addr, event + offset + 2, 6);
         item.rssi = event[offset + 9 + dataLength];
         item.appleTypes = 0;
-        continuityTypes(event + offset + 9, dataLength, &item.appleTypes);
+        appleTypeIds(event + offset + 9, dataLength, &item.appleTypes);
         offset += 9 + dataLength + 1;
     }
     return items;
