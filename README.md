@@ -2,7 +2,7 @@
 
 在 Intel 无线网卡上把 **AirDrop（AWDL）** 跑起来的 AirportItlwm 分支。普通 Wi-Fi 照常工作，AirDrop 与它并行。
 
-基于 [laobamac/itlwm](https://github.com/laobamac/itlwm) 的 AirportItlwm（原生 Wi-Fi 接口），AWDL 层为本仓库新增。当前版本 **2.5.10**。
+基于 [laobamac/itlwm](https://github.com/laobamac/itlwm) 的 AirportItlwm（原生 Wi-Fi 接口），AWDL 层为本仓库新增。当前版本 **2.5.15**。
 
 ---
 
@@ -13,7 +13,8 @@
 | 未连 Wi-Fi 时 AirDrop 双向传输 | 可用 |
 | 连着 Wi-Fi 时 AirDrop | 可用 |
 | 传输中同时扫描全频段 SSID | 可用，扫描面板不再空白 |
-| 关闭再打开 Wi-Fi | 自愈，无需重启 |
+| 关闭再打开 Wi-Fi | 可用，自愈重建约 6 秒，无需重启 |
+| 关联/未关联来回切换 | 可用，不再出现"一直等待中" |
 | 先传过文件、再去连 Wi-Fi | 首次传输即通，不用等 30 秒超时 |
 | 多设备并发（3 台手机） | 可用 |
 
