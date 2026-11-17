@@ -7,6 +7,9 @@
 //
 #include "AirportItlwmV2.hpp"
 #include "AirportItlwmSkywalkInterface.hpp"
+#if defined(ITL_AWDL_NATIVE)
+#include "AirportAWDLInterface.hpp"
+#endif
 #include <sys/CTimeout.hpp>
 #include <libkern/c++/OSMetaClass.h>
 #include <crypto/sha1.h>
@@ -99,6 +102,13 @@ static int ieeeChanFlag2apple(int flags, int bw)
 void AirportItlwmSkywalkInterface::associateSSID(uint8_t *ssid, uint32_t ssid_len, const struct ether_addr &bssid, uint32_t authtype_lower, uint32_t authtype_upper, uint8_t *key, uint32_t key_len, int key_index)
 {
     struct ieee80211com *ic = fHalService->get80211Controller();
+    // Caller lengths are copied into fixed fields below: the SSID into 32 bytes, the PSK as 32 bytes,
+    // and the WEP key index into a 4-entry array. Refuse anything that doesn't fit.
+    if (!ic || (ssid_len && !ssid) || ssid_len > IEEE80211_NWID_LEN || key_len > APPLE80211_KEY_BUFF_LEN ||
+        (key_len && !key) || key_index < 0 || key_index >= IEEE80211_WEP_NKID) {
+        XYLog("%s: refused, ssid_len=%u key_len=%u key_index=%d\n", __FUNCTION__, ssid_len, key_len, key_index);
+        return;
+    }
     
     ieee80211_disable_rsn(ic);
     ieee80211_disable_wep(ic);
@@ -189,7 +199,7 @@ void AirportItlwmSkywalkInterface::setPTK(const u_int8_t *key, size_t key_len) {
         
         /* check that key length matches that of pairwise cipher */
         keylen = ieee80211_cipher_keylen(ni->ni_rsncipher);
-        if (key_len != keylen) {
+        if (keylen < 0 || key_len != (size_t)keylen) {
             XYLog("PTK length mismatch. expected %d, got %zu\n", keylen, key_len);
             return;
         }
@@ -226,13 +236,13 @@ void AirportItlwmSkywalkInterface::setGTK(const u_int8_t *gtk, size_t key_len, u
     if (gtk != NULL) {
         /* check that key length matches that of group cipher */
         keylen = ieee80211_cipher_keylen(ni->ni_rsngroupcipher);
-        if (key_len != keylen) {
+        if (keylen < 0 || key_len != (size_t)keylen) {
             XYLog("GTK length mismatch. expected %d, got %zu\n", keylen, key_len);
             return;
         }
         /* map GTK to 802.11 key */
         k = &ic->ic_nw_keys[kid];
-        if (k->k_cipher == IEEE80211_CIPHER_NONE || k->k_len != keylen || memcmp(k->k_key, gtk, keylen) != 0) {
+        if (k->k_cipher == IEEE80211_CIPHER_NONE || k->k_len != (u_int)keylen || memcmp(k->k_key, gtk, keylen) != 0) {
             memset(k, 0, sizeof(*k));
             k->k_id = kid;    /* 0-3 */
             k->k_cipher = ni->ni_rsngroupcipher;
@@ -296,6 +306,57 @@ init(IOService *provider)
     return ret;
 }
 
+IOReturn AirportItlwmSkywalkInterface::
+setVIRTUAL_IF_CREATE(apple80211_virt_if_create_data *data)
+{
+    auto publish = [](AirportItlwm *controller, const char *key, UInt64 value) {
+        OSNumber *number = OSNumber::withNumber(value, 64);
+        if (number) {
+            controller->setProperty(key, number);
+            number->release();
+        }
+    };
+
+    if (!instance)
+        return kIOReturnNotReady;
+
+    publish(instance, "ItlwmAWDLCreateRequests", __sync_add_and_fetch(&instance->awdlCreateRequests, 1));
+    if (!data) {
+        publish(instance, "ItlwmAWDLCreateResult", kIOReturnBadArgument);
+        return kIOReturnBadArgument;
+    }
+    publish(instance, "ItlwmAWDLCreateRole", data->role);
+    if (!instance->awdlInterfaceTest || data->role != APPLE80211_VIF_AWDL) {
+        publish(instance, "ItlwmAWDLCreateResult", kIOReturnUnsupported);
+        return kIOReturnUnsupported;
+    }
+    if (instance->fAWDLInterface) {
+        publish(instance, "ItlwmAWDLCreateResult", kIOReturnSuccess);
+        return kIOReturnSuccess;
+    }
+
+    ether_addr address;
+    memcpy(address.octet, data->mac, sizeof(address.octet));
+    const bool attached = instance->attachVirtualInterface(&instance->fAWDLInterface, &address, data->role, false);
+    IOReturn result = attached ? kIOReturnSuccess : kIOReturnError;
+#if defined(ITL_AWDL_NATIVE)
+    if (attached) {
+        result = static_cast<ItlAWDLInterface *>(instance->fAWDLInterface)->initializeNetwork(
+            instance, instance->getWorkQueue(), address);
+        if (result != kIOReturnSuccess) {
+            // initializeNetwork unwinds an unpublished object. Native virtual
+            // terminate() assumes a started controller context, which a failed
+            // start does not guarantee; detach this unpublished service directly.
+            instance->fAWDLInterface->detach(instance);
+            instance->fAWDLInterface->release();
+            instance->fAWDLInterface = nullptr;
+        }
+    }
+#endif
+    publish(instance, "ItlwmAWDLCreateResult", result);
+    return result;
+}
+
 //ifnet_t AirportItlwmSkywalkInterface::
 //getBSDInterface()
 //{
@@ -335,6 +396,8 @@ getAUTH_TYPE(struct apple80211_authtype_data *ad)
 IOReturn AirportItlwmSkywalkInterface::
 setAUTH_TYPE(struct apple80211_authtype_data *ad)
 {
+    if (!ad)
+        return kIOReturnBadArgument;
     current_authtype_lower = ad->authtype_lower;
     current_authtype_upper = ad->authtype_upper;
     return kIOReturnSuccess;
@@ -346,29 +409,21 @@ setCIPHER_KEY(struct apple80211_key *key)
 #ifdef AIRPORT_WCL
     return _fCommandGate->runAction(wclCommand, this, reinterpret_cast<void *>(8), key);
 #else
-
-    XYLog("%s\n", __FUNCTION__);
-    const char* keydump = hexdump(key->key, key->key_len);
-    const char* rscdump = hexdump(key->key_rsc, key->key_rsc_len);
-    const char* eadump = hexdump(key->key_ea.octet, APPLE80211_ADDR_LEN);
+    // Used on Sonoma, which has no WCL. Never log key material, and check every caller length and
+    // index before it is used (security audit L02).
+    if (!key)
+        return kIOReturnBadArgument;
+    if (key->key_len > APPLE80211_KEY_BUFF_LEN || key->key_rsc_len > APPLE80211_RSC_LEN ||
+        key->key_index >= IEEE80211_WEP_NKID)
+        return kIOReturnBadArgument;
+    XYLog("%s: len=%u cipher_type=%u flags=%u index=%u rsc_len=%u\n", __FUNCTION__,
+          key->key_len, key->key_cipher_type, key->key_flags, key->key_index, key->key_rsc_len);
     static_assert(__offsetof(struct apple80211_key, key_ea) == 92, "struct corrupted");
     static_assert(__offsetof(struct apple80211_key, key_rsc_len) == 80, "struct corrupted");
     static_assert(__offsetof(struct apple80211_key, wowl_kck_len) == 100, "struct corrupted");
     static_assert(__offsetof(struct apple80211_key, wowl_kek_len) == 120, "struct corrupted");
     static_assert(__offsetof(struct apple80211_key, wowl_kck_key) == 104, "struct corrupted");
-    if (keydump && rscdump && eadump)
-        XYLog("Set key request: len=%d cipher_type=%d flags=%d index=%d key=%s rsc_len=%d rsc=%s ea=%s\n",
-              key->key_len, key->key_cipher_type, key->key_flags, key->key_index, keydump, key->key_rsc_len, rscdump, eadump);
-    else
-        XYLog("Set key request, but failed to allocate memory for hexdump\n");
-    
-    if (keydump)
-        IOFree((void*)keydump, 3 * key->key_len + 1);
-    if (rscdump)
-        IOFree((void*)rscdump, 3 * key->key_rsc_len + 1);
-    if (eadump)
-        IOFree((void*)eadump, 3 * APPLE80211_ADDR_LEN + 1);
-    
+
     switch (key->key_cipher_type) {
         case APPLE80211_CIPHER_NONE:
             // clear existing key
@@ -381,6 +436,9 @@ setCIPHER_KEY(struct apple80211_key *key)
         case APPLE80211_CIPHER_TKIP:
         case APPLE80211_CIPHER_AES_OCB:
         case APPLE80211_CIPHER_AES_CCM:
+            // setPTK and setGTK use the current BSS node.
+            if (!fHalService->get80211Controller()->ic_bss)
+                return kIOReturnNotReady;
             switch (key->key_flags) {
                 case 4: // PTK
                     setPTK(key->key, key->key_len);
@@ -395,11 +453,15 @@ setCIPHER_KEY(struct apple80211_key *key)
             break;
         case APPLE80211_CIPHER_MSK:
             XYLog("Setting MSK\n");
+            if (!fHalService->get80211Controller()->ic_bss || key->key_len < 32)
+                return kIOReturnBadArgument;
             ieee80211_pmksa_add(fHalService->get80211Controller(), IEEE80211_AKM_8021X,
                                 fHalService->get80211Controller()->ic_bss->ni_macaddr, key->key, 0);
             break;
         case APPLE80211_CIPHER_PMKSA:
             XYLog("Setting WPA PMKSA\n");
+            if (!fHalService->get80211Controller()->ic_bss || key->key_len < 32)
+                return kIOReturnBadArgument;
             ieee80211_pmksa_add(fHalService->get80211Controller(), IEEE80211_AKM_8021X,
                                 fHalService->get80211Controller()->ic_bss->ni_macaddr, key->key, 0);
             break;
@@ -490,11 +552,78 @@ getMCS_INDEX_SET(struct apple80211_mcs_index_set_data *ad)
         memset(ad, 0, sizeof(*ad));
         ad->version = APPLE80211_VERSION;
         size_t size = min(ARRAY_SIZE(ic->ic_bss->ni_rxmcs), ARRAY_SIZE(ad->mcs_set_map));
-        for (int i = 0; i < size; i++)
+        for (size_t i = 0; i < size; i++)
             ad->mcs_set_map[i] = ic->ic_bss->ni_rxmcs[i];
         return kIOReturnSuccess;
     }
     return 6;
+}
+
+extern bool itlAWDLBuildAllowed();
+// -itlawdlcaps: answer the native stack's HT and VHT capability requests. Without them it
+// assumes one HT stream and no VHT, and advertises that to AWDL peers in TLV 7 and leaves out
+// TLV 17, so a peer sends to us at 20 MHz on one stream. The values are the AX211's own.
+static bool itlAWDLAdvertiseCaps()
+{
+    static int cached = -1;
+    if (cached < 0) {
+        int dummy = 0;
+        cached = itlAWDLBuildAllowed() && !PE_parse_boot_argn("-itlawdlnocaps", &dummy, sizeof(dummy)) ? 1 : 0;
+    }
+    return cached == 1;
+}
+
+IOReturn AirportItlwmSkywalkInterface::
+getHT_CAPABILITY(struct apple80211_ht_capability *data)
+{
+    if (!itlAWDLAdvertiseCaps() || !data)
+        return kIOReturnUnsupported;
+    memset(data, 0, sizeof(*data));
+    data->version = APPLE80211_VERSION;
+    data->hc_id = IEEE80211_ELEMID_HTCAPS;
+    data->hc_len = 26;
+    // LDPC, 20/40 MHz, SM power save off, short GI at 20 and 40 MHz: 0x006f, as the stack's default.
+    data->hc_cap = 0x006f;
+    // Maximum A-MPDU 64 KB, minimum spacing 8 us.
+    data->hc_param = 0x1b;
+    // MCS 0 to 15: two spatial streams.
+    data->hc_mcsset[0] = 0xff;
+    data->hc_mcsset[1] = 0xff;
+    return kIOReturnSuccess;
+}
+
+// -itlawdlcapshtonly: two HT streams, but no VHT, to see what VHT changes on its own.
+static bool itlAWDLAdvertiseHtOnly()
+{
+    static int cached = -1;
+    if (cached < 0) {
+        int dummy = 0;
+        cached = PE_parse_boot_argn("-itlawdlcapshtonly", &dummy, sizeof(dummy)) ? 1 : 0;
+    }
+    return cached == 1;
+}
+
+IOReturn AirportItlwmSkywalkInterface::
+getVHT_CAPABILITY(struct apple80211_vht_capability *data)
+{
+    if (!itlAWDLAdvertiseCaps() || itlAWDLAdvertiseHtOnly() || !data)
+        return kIOReturnUnsupported;
+    memset(data, 0, sizeof(*data));
+    data->version = APPLE80211_VERSION;
+    // The stack copies the 14 bytes after the version: a VHT Capabilities element.
+    uint8_t *element = reinterpret_cast<uint8_t *>(data) + 4;
+    element[0] = 191;   // Element ID.
+    element[1] = 12;    // Length.
+    // Max MPDU 3895, 80 MHz only, RX LDPC, short GI at 80 MHz, max A-MPDU exponent 7.
+    const uint32_t info = 0x00000010U | 0x00000020U | (7U << 23);
+    element[2] = uint8_t(info);
+    element[3] = uint8_t(info >> 8);
+    element[4] = uint8_t(info >> 16);
+    element[5] = uint8_t(info >> 24);
+    // MCS 0 to 9 on streams 1 and 2, none on the others, for receive and transmit.
+    element[6] = 0xfa; element[7] = 0xff;
+    element[10] = 0xfa; element[11] = 0xff;
+    return kIOReturnSuccess;
 }
 
 IOReturn AirportItlwmSkywalkInterface::
@@ -550,7 +679,7 @@ getRATE_SET(struct apple80211_rate_set_data *ad)
         ad->version = APPLE80211_VERSION;
         ad->num_rates = ic->ic_bss->ni_rates.rs_nrates;
         size_t size = min(ic->ic_bss->ni_rates.rs_nrates, ARRAY_SIZE(ad->rates));
-        for (int i=0; i < size; i++) {
+        for (size_t i=0; i < size; i++) {
 #ifdef AIRPORT_WCL
             struct apple80211_rate &apple_rate = ad->rates[i];
 #else
@@ -766,7 +895,14 @@ getNSS(struct apple80211_nss_data *data)
 IOReturn AirportItlwmSkywalkInterface::
 setASSOCIATE(struct apple80211_assoc_data *ad)
 {
-    XYLog("%s [%s] mode=%d ad_auth_lower=%d ad_auth_upper=%d rsn_ie_len=%d%s%s%s%s%s%s%s\n", __FUNCTION__, ad->ad_ssid, ad->ad_mode, ad->ad_auth_lower, ad->ad_auth_upper, ad->ad_rsn_ie_len,
+    // Joins normally come through setWCL_ASSOCIATE, whose decoder bounds every length. This legacy
+    // entry point used to read and copy caller lengths unchecked; check them before anything else.
+    if (!ad)
+        return kIOReturnBadArgument;
+    if (ad->ad_ssid_len > APPLE80211_MAX_SSID_LEN || ad->ad_key.key_len > APPLE80211_KEY_BUFF_LEN ||
+        ad->ad_key.key_index >= IEEE80211_WEP_NKID || size_t(ad->ad_rsn_ie[1]) + 2 > APPLE80211_MAX_RSN_IE_LEN)
+        return kIOReturnBadArgument;
+    XYLog("%s [%.*s] mode=%d ad_auth_lower=%d ad_auth_upper=%d rsn_ie_len=%d%s%s%s%s%s%s%s\n", __FUNCTION__, int(ad->ad_ssid_len), ad->ad_ssid, ad->ad_mode, ad->ad_auth_lower, ad->ad_auth_upper, ad->ad_rsn_ie_len,
           (ad->ad_flags & 2) ? ", Instant Hotspot" : "",
           (ad->ad_flags & 4) ? ", Auto Instant Hotspot" : "",
           (ad->ad_rsn_ie[APPLE80211_MAX_RSN_IE_LEN] & 1) ? ", don't disassociate" : "",
@@ -778,9 +914,6 @@ setASSOCIATE(struct apple80211_assoc_data *ad)
     struct apple80211_rsn_ie_data rsn_ie_data;
     struct apple80211_authtype_data auth_type_data;
     struct ieee80211com *ic = fHalService->get80211Controller();
-
-    if (!ad)
-        return kIOReturnError;
     
     if (ic->ic_state < IEEE80211_S_SCAN)
         return kIOReturnSuccess;
@@ -955,6 +1088,8 @@ setSCAN_REQ(struct apple80211_scan_data *sd)
           sd->ssid,
           ether_sprintf(sd->bssid.octet));
 #endif
+    if (!sd)
+        return kIOReturnBadArgument;
     if (fScanResultWrapping)
         return 22;
     if (ic->ic_state <= IEEE80211_S_INIT)
@@ -981,8 +1116,9 @@ static int convertNodeToScanResult(ItlHalService *fHalService, struct ieee80211_
     bzero(result, sizeof(*result));
     result->version = APPLE80211_VERSION;
     if (fNextNodeToSend->ni_rsnie_tlv && fNextNodeToSend->ni_rsnie_tlv_len > 0) {
-        result->asr_ie_len = fNextNodeToSend->ni_rsnie_tlv_len;
-        memcpy(result->asr_ie_data, fNextNodeToSend->ni_rsnie_tlv, MIN(result->asr_ie_len, sizeof(result->asr_ie_data)));
+        size_t ielen = MIN((size_t)fNextNodeToSend->ni_rsnie_tlv_len, sizeof(result->asr_ie_data));
+        result->asr_ie_len = (int16_t)ielen;
+        memcpy(result->asr_ie_data, fNextNodeToSend->ni_rsnie_tlv, ielen);
     } else {
         result->asr_ie_len = 0;
     }
@@ -1074,5 +1210,40 @@ IOReturn AirportItlwmSkywalkInterface::setMacAddress(mloAddrArray &addresses)
 IOReturn AirportItlwmSkywalkInterface::getHW_ADDR(apple80211_hw_mac_address *)
 {
     return kIOReturnUnsupported;
+}
+#endif
+
+#ifndef AIRPORT_WCL
+// Sonoma has no WCL, but the same metric matters: without it en0's link quality stays "off" (-2),
+// apsd won't connect push over Wi-Fi, and iMessage fails (upstream's Sonoma release notes say as
+// much). IOSkywalkNetworkInterface::reportLinkQuality is exported by 23J631's IOSkywalkFamily.
+extern "C" IOReturn itlReportLinkQualitySonoma(IOSkywalkNetworkInterface *, unsigned int)
+    __asm__("__ZN25IOSkywalkNetworkInterface17reportLinkQualityEj");
+
+void AirportItlwmSkywalkInterface::postLinkQuality()
+{
+    struct ieee80211com *ic = fHalService ? fHalService->get80211Controller() : nullptr;
+    if (!ic)
+        return;
+    // The kernel's IFNET_LQM_THRESH_* values: off -2, bad 10, poor 50, good 100.
+    const bool up = ic->ic_state == IEEE80211_S_RUN && ic->ic_bss && ic->ic_bss->ni_port_valid;
+    int32_t quality = -2;
+    if (up) {
+        if (++linkQualityTicks % 2)
+            return;
+        apple80211_rssi_data rssi = {};
+        if (getRSSI(&rssi) != kIOReturnSuccess || rssi.aggregate_rssi >= 0)
+            return;
+        quality = rssi.aggregate_rssi >= -70 ? 100 : rssi.aggregate_rssi >= -80 ? 50 : 10;
+        if (quality == linkQualityReported)
+            return;
+    } else if (!linkQualityReported) {
+        return;   // already off, or never reported
+    }
+    const IOReturn result = itlReportLinkQualitySonoma(static_cast<IOSkywalkNetworkInterface *>(this), uint32_t(quality));
+    if (result == kIOReturnSuccess)
+        linkQualityReported = up ? quality : 0;
+    setProperty("ItlwmLinkQuality", uint64_t(uint32_t(quality)), 32);
+    setProperty("ItlwmLinkQualityResult", uint64_t(uint32_t(result)), 32);
 }
 #endif

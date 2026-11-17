@@ -141,6 +141,8 @@
 #include <HAL/ItlDriverInfo.hpp>
 #include <HAL/ItlDriverController.hpp>
 
+namespace ItlAWDL { struct MccSample; }
+
 class ItlIwx : public ItlHalService, ItlDriverInfo, ItlDriverController {
     OSDeclareDefaultStructors(ItlIwx)
     
@@ -161,6 +163,12 @@ public:
 #endif
     
     static bool intrFilter(OSObject *object, IOFilterInterruptEventSource *src);
+#ifdef AIRPORT_WCL
+    // MSI lost-interrupt poll: reap causes an edge-triggered MSI dropped.
+    void pollLostInterrupt() override;
+#endif
+    uint32_t msipollChecks = 0;
+    uint32_t msipollReaps = 0;
     static IOReturn _iwx_start_task(OSObject *target, void *arg0, void *arg1, void *arg2, void *arg3);
     
     virtual ItlDriverInfo *getDriverInfo() override;
@@ -276,7 +284,9 @@ public:
     int    iwx_nic_init(struct iwx_softc *);
     int    iwx_enable_txq(struct iwx_softc *, int, int, int, int);
     int     iwx_tvqm_alloc_txq(struct iwx_softc *, int, int);
-    int     iwx_tvqm_enable_txq(struct iwx_softc *, int, int, uint32_t);
+    struct CoexBaQueueOwner { int generation; uint32_t listener, peer; };
+    int     iwx_tvqm_enable_txq(struct iwx_softc *, int, int, uint32_t, int = IWX_STATION_ID,
+                               const CoexBaQueueOwner * = nullptr);
     void    iwx_post_alive(struct iwx_softc *);
     int iwx_send_time_event_cmd(struct iwx_softc *sc,
                             const struct iwx_time_event_cmd *cmd);
@@ -339,6 +349,17 @@ public:
             struct ieee80211_rxinfo *);
     int    iwx_ccmp_decap(struct iwx_softc *, mbuf_t,
                           struct ieee80211_node *, struct ieee80211_rxinfo *);
+    static void    awdlRxTimeout(void *);
+    static void    awdlRxTask(void *);
+    static void    awdlCoexCycleTimeout(void *);
+    static void    awdlCoexCycleTask(void *);
+    static void    awdlCoexBootTask(void *);
+    static void    awdlCoexBootTimeout(void *);
+    static void    awdlCoexHoldTimeout(void *);
+    static void    awdlCoexTxTimeout(void *);
+    static void    awdlCoexTxTask(void *);
+    void    awdlAfterCompletion(struct iwx_softc *);
+    void    awdlRxObserve(struct iwx_softc *, mbuf_t, int, int, uint32_t);
     void    iwx_rx_frame(struct iwx_softc *, mbuf_t, int, uint32_t, int, int,
            uint32_t, struct ieee80211_rxinfo *, struct mbuf_list *);
     void iwx_rx_mpdu_mq(struct iwx_softc *sc, mbuf_t m, void *pktdata,
@@ -376,7 +397,20 @@ public:
                             const struct iwx_rate *rinfo, int type, struct ieee80211_frame *wh);
     void    iwx_toggle_tx_ant(struct iwx_softc *sc, uint8_t *ant);
     void    iwx_tx_update_byte_tbl(struct iwx_softc *, struct iwx_tx_ring *, int, uint16_t, uint16_t);
-    int    iwx_tx(struct iwx_softc *, mbuf_t, struct ieee80211_node *, int);
+    int    iwx_tx(struct iwx_softc *, mbuf_t, struct ieee80211_node *, int, int = -1);
+    int iwx_tx_monitor_frame(struct iwx_softc *, mbuf_t, struct ieee80211_node *);
+    int iwx_tx_monitor_burst(struct iwx_softc *, mbuf_t, struct ieee80211_node *);
+private:
+    int awdlMonitorQueue = -1;
+    int awdlMonitorGeneration = -1;
+    bool awdlMonitorTxArmed = false;
+    bool awdlMonitorTxAttempted = false;
+    bool awdlMonitorProbeStarted = false;
+    unsigned awdlMonitorReadinessPolls = 0;
+    unsigned awdlMonitorSubmitted = 0;
+    bool awdlMonitorCompletedOK = false;
+    struct iwx_tx_data *awdlMonitorPending = nullptr;
+public:
     int    iwx_flush_sta_tids(struct iwx_softc *, int, uint16_t);
     int    iwx_flush_sta(struct iwx_softc *, struct iwx_node *);
     int    iwx_drain_sta(struct iwx_softc *sc, struct iwx_node *, int);
@@ -431,6 +465,22 @@ public:
     int    iwx_enable_mgmt_queue(struct iwx_softc *);
     int    iwx_phy_ctxt_update(struct iwx_softc *, struct iwx_phy_ctxt *,
                                struct ieee80211_channel *, uint8_t, uint8_t, uint32_t);
+    int    iwx_awdl_monitor_channel(struct iwx_softc *, unsigned);
+    void   iwx_awdl_transport_probe(struct iwx_softc *);
+    void   awdlApplyMacAddress(struct iwx_softc *, const uint8_t *);
+    int    awdlCoexListener(struct iwx_softc *, bool add);
+    int    awdlCoexMacSend(struct iwx_softc *, uint32_t action);
+    int    awdlCoexTxSetup(struct iwx_softc *);
+    int    awdlCoexTxTeardown(struct iwx_softc *);
+    void   awdlCoexTxSend(struct iwx_softc *);
+    void   awdlCoexCountryAnswer(struct iwx_softc *);
+    void   awdlCoexRetarget(struct iwx_softc *);
+    void   awdlCoexDataPump(struct iwx_softc *, unsigned budget = ~0U);
+    void   awdlCoexBaHandleSlot(struct iwx_softc *, unsigned slot);
+    int    awdlCoexBaSlotRemovePeer(struct iwx_softc *, unsigned slot);
+    int    awdlCoexBaSlotAddPeer(struct iwx_softc *, unsigned slot, const uint8_t *);
+    void   awdlCoexBaSlotPauseStep(struct iwx_softc *, unsigned slot);
+    bool   awdlCoexSendMgmt(struct iwx_softc *, const uint8_t *, size_t, uint8_t kind, unsigned baSlot = 0);
     int    iwx_auth(struct iwx_softc *);
     int    iwx_deauth(struct iwx_softc *);
     int    iwx_run(struct iwx_softc *);
@@ -450,6 +500,14 @@ public:
     int    iwx_send_bt_init_conf(struct iwx_softc *);
     int    iwx_send_soc_conf(struct iwx_softc *);
     int    iwx_send_update_mcc_cmd(struct iwx_softc *, const char *);
+    int    iwx_mcc_request(struct iwx_softc *, uint16_t, uint8_t, ItlAWDL::MccSample *, bool);
+    bool    awdlCountryAnswer(struct iwx_softc *);
+    void    awdlBaHandle(struct iwx_softc *);
+    void    awdlBaTxStep(struct iwx_softc *);
+    bool    awdlBaTxSend(struct iwx_softc *, mbuf_t);
+    bool    awdlBaTxQueueFull(struct iwx_softc *);
+    void    awdlCountryScan(struct iwx_softc *);
+    static void    mccProbeTimeout(void *);
     int    iwx_send_temp_report_ths_cmd(struct iwx_softc *);
     int    iwx_init_hw(struct iwx_softc *);
     int    iwx_init(struct _ifnet *);

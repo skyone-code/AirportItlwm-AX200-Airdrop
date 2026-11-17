@@ -77,10 +77,19 @@ IOReturn get##REQ(OSObject *object, struct DATA_TYPE *data);
 IOReturn set##REQ(OSObject *object, struct DATA_TYPE *data);
     
 public:
+    IOReturn receiveAWDLActionFrame(mbuf_t, size_t, uint32_t, int32_t);
+    void observeAWDLDataFrame(const uint8_t*, size_t);
+    IOReturn buildAWDLSyncProbe(mbuf_t*, uint64_t);
+    IOReturn buildAWDLTransmit(mbuf_t*, const uint8_t *holdPayloadFor = nullptr, bool holdEverySize = false);
+    IOReturn buildAWDLTransmit(mbuf_t*, const struct ItlAWDLTransmitHold *holds, unsigned holdCount);
+    bool serviceAWDLTransmit();
+    unsigned queuedAWDLTransmit();
+    unsigned heldShortAWDLTransmit();
     virtual bool init(OSDictionary *properties) override;
     virtual void free() override;
     virtual IOService* probe(IOService* provider, SInt32* score) override;
     virtual bool start(IOService *provider) override;
+    bool startDriver(IOService *provider);
     virtual void stop(IOService *provider) override;
     virtual IOReturn enable(IO80211SkywalkInterface *netif) AIRPORT_LEGACY_OVERRIDE;
     virtual IOReturn disable(IO80211SkywalkInterface *netif) AIRPORT_LEGACY_OVERRIDE;
@@ -129,6 +138,12 @@ public:
     CCLogStream *driverLogger;
 #else
     virtual IO80211WorkQueue *getWorkQueue() override;
+    // Sonoma 14.8.9 (23J631) uses IONetworkController's reserved slots 6 and 7. Point them at Apple's
+    // functions, which the SDK still declares as reserved. Declared only: never called from the driver.
+private:
+    virtual void _RESERVEDIONetworkController6() override __asm__("__ZN19IONetworkController20allocatePacketNoWaitEj");
+    virtual void _RESERVEDIONetworkController7() override __asm__("__ZN19IONetworkController18setHardwareAssistsEjj");
+public:
 #endif
     virtual bool requiresExplicitMBufRelease() override {
         return false;
@@ -155,10 +170,13 @@ public:
     virtual SInt32 apple80211_ioctl(IO80211SkywalkInterface *,unsigned long,void *, bool, bool) AIRPORT_LEGACY_OVERRIDE;
     virtual SInt32 apple80211SkywalkRequest(UInt,int,IO80211SkywalkInterface *,void *) AIRPORT_LEGACY_OVERRIDE;
     virtual SInt32 apple80211SkywalkRequest(UInt,int,IO80211SkywalkInterface *,void *,void *) AIRPORT_LEGACY_OVERRIDE;
+    virtual IO80211VirtualInterface *createVirtualInterface(ether_addr *, UInt) override;
 
     bool createMediumTables(const IONetworkMedium **primary);
     void releaseAll();
     void watchdogAction(IOTimerEventSource *timer);
+    void msipollAction(IOTimerEventSource *timer);
+#define kMsipollPeriod 100
     
     virtual SInt32 enableFeature(IO80211FeatureCode, void*) override;
     virtual bool isCommandProhibited(int command) override {
@@ -227,6 +245,8 @@ public:
 public:
     IOInterruptEventSource* fInterrupt;
     IOTimerEventSource *watchdogTimer;
+    IOTimerEventSource *msipollTimer = nullptr;
+    bool msipollEnabled = false;
     IOPCIDevice *pciNub;
     IONetworkStats *fpNetStats;
     AirportItlwmEthernetInterface *bsdInterface;
@@ -259,6 +279,16 @@ public:
     UInt8 pmPCICapPtr;
     bool magicPacketEnabled;
     bool magicPacketSupported;
+    IO80211VirtualInterface *fAWDLInterface;
+    bool awdlInterfaceTest;
+    bool awdlExtendFrames;
+    // -itlawdlhideinfra (test, #24): sync frames leave out the Mac's Wi-Fi network and channel.
+    bool awdlHideInfra;
+    uint16_t awdlProbeSequence = 0;
+    bool awdlManagementInputEnabled;
+    UInt32 awdlManagementActive;
+    void teardownAWDLInterface();
+    UInt32 awdlCreateRequests;
     
     //AWDL
     uint8_t *syncFrameTemplate;

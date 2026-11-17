@@ -48,6 +48,9 @@ public:
     virtual struct ieee80211com *get80211Controller() = 0;
 #ifdef AIRPORT_WCL
     virtual IOReturn setScanHomeAwayTime(uint32_t) { return kIOReturnUnsupported; }
+    // MSI lost-interrupt poll hook: called periodically from AirportItlwm when
+    // booted with -itlawdlmsipoll. Default no-op; iwx checks for unhandled causes.
+    virtual void pollLostInterrupt() {}
 #endif
     
     virtual ItlDriverInfo *getDriverInfo() = 0;
