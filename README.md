@@ -21,7 +21,7 @@
 ## 现在还不能做什么
 
 - **只支持这三条系统线**：macOS 26.7.1/26.7.2/26.7.3（Tahoe）、15.8 与 15.8.3（Sequoia，其他 15.8.x 按 "expected" 放行）、14.8.9（Sonoma）。其他构建由运行时校验挡住，驱动退化成普通 Wi-Fi。
-- **蓝牙不在本仓库**：AirDrop 发现设备依赖蓝牙 LE，出向 LE 建连在部分机型上仍会 `status=702`（控制器没有 resolving list）。蓝牙侧请自行配 `BlueToolFixup` + `IntelBluetoothFirmware`。
+- **蓝牙是单独的 kext**：AirDrop 发现设备依赖蓝牙 LE，出向 LE 建连在部分机型上仍会 `status=702`（控制器没有 resolving list）。蓝牙侧补丁源码在 `IntelBTPatcher/`（Lilu 插件，本仓库一并构建），另需 `BlueToolFixup`；它与 Wi-Fi 互不依赖，可以不装。
 - **AWDL 时间窗对齐偏粗**，靠单帧堆速率，长传输每 20 秒左右有一次扫描放行导致的短暂速率抖动。
 - **不支持** WPA3-only、强制 PMF、MLO。
 - 只在**部分机型**上验证过，见 [docs/LIMITATIONS.md](docs/LIMITATIONS.md)。
@@ -66,6 +66,22 @@ xcodebuild -project itlwm.xcodeproj -scheme AirportItlwm-Tahoe \
 
 完整说明见 [docs/BUILD.md](docs/BUILD.md)。
 
+### 蓝牙 kext（IntelBTPatcher）
+
+两种方式产物等价，任选其一：
+
+```bash
+# Xcode 工程
+xcodebuild -project IntelBTPatcher.xcodeproj -scheme IntelBTPatcher \
+  -configuration Release -derivedDataPath ./build/dd-bt build
+# 产物：build/dd-bt/Build/Products/Release/IntelBTPatcher.kext
+
+# 独立脚本（不经过工程，便于交叉核对）
+python3 IntelBTPatcher/tools/build_intelbtpatcher.py --out /tmp/bt --tree . --target tahoe
+```
+
+Lilu SDK 头在 `Dependencies/Lilu.kext/`，和 `MacKernelSDK/` 一样被 `.gitignore` 挡住，clone 后需自行放入。版本号两处同步：工程里的 `MODULE_VERSION` 与脚本里的 `VERSION`。
+
 ## 验证装好了没有
 
 ```bash
@@ -86,6 +102,9 @@ AirportItlwm/          kext 主体，AWDL 接口与集成点在这里
 include/               AWDL 协议实现（帧、调度、探测、监管域……）与 Apple 私有头
 itl80211/ itlwm/       net80211 与 iwlwifi 移植（上游）
 itlwm.xcodeproj        构建工程
+IntelBTPatcher/        蓝牙补丁 kext（Lilu 插件）源码
+IntelBTPatcher.xcodeproj  它的构建工程
+Dependencies/          Lilu SDK 头与 plugin_start.cpp（.gitignore）
 scripts/               上游脚本
 docs/                  安装、构建、架构、诊断、限制
 ```
