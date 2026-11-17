@@ -1,4 +1,4 @@
-// Host tests for the scan-park resume logic in IbtpHci.hpp (pure logic, no kernel types).
+// Host tests for the scan-park resume logic in IntelBTPatcherHci.hpp (pure logic, no kernel types).
 // Build & run:  clang++ -std=c++17 -Wall -Wextra -I. -o /tmp/test-scan-resume test-scan-resume.cpp && /tmp/test-scan-resume
 #include "IntelBTPatcherHci.hpp"
 #include <cstdio>
@@ -9,203 +9,203 @@ static int failures = 0;
 
 using namespace Ibtp;
 
-static State baseState() {
-    State s{};
-    s.extScanEnable = 1; s.extScanFilterDup = 1;
-    s.extAdvEnabled = true;
+static Mirror baseState() {
+    Mirror s{};
+    s.extScanOn = 1; s.extScanDup = 1;
+    s.extAdvOn = true;
     return s;
 }
 
 // Simulates bluetoothd enabling extended scanning (0x2042) and one advertising set (0x2039),
-// through the mirror, so extAdvReplay holds the verbatim packet.
-static void hostEnablesAll(State &s, ScanResumeState &r) {
+// through the mirror, so advReplay holds the verbatim packet.
+static void hostEnablesAll(Mirror &s, Park &r) {
     uint8_t scan[5] = {0x42, 0x20, 0x02, 0x01, 0x01};
-    PreCommand out[4] = {};
-    CHECK(wantsPreScanOff(s, r, scan, sizeof(scan), out) == 0);
-    CHECK(s.extScanEnable == 1);
+    OutPacket out[4] = {};
+    CHECK(parkBeforeCreate(s, r, scan, sizeof(scan), out) == 0);
+    CHECK(s.extScanOn == 1);
     uint8_t adv[10] = {0x39, 0x20, 0x07, 0x01, 0x01, 0x00, 0x02, 0x00, 0x7f, 0x00};
-    CHECK(wantsPreScanOff(s, r, adv, sizeof(adv), out) == 0);
-    CHECK(s.extAdvEnabled);
+    CHECK(parkBeforeCreate(s, r, adv, sizeof(adv), out) == 0);
+    CHECK(s.extAdvOn);
 }
 
-static int tickCommand(State &s, ScanResumeState &r) {
-    // Any non-create command passes through wantsPreScanOff (no-op) and wantsScanResume.
+static int tickCommand(Mirror &s, Park &r) {
+    // Any non-create command passes through parkBeforeCreate (no-op) and restoreAfterCreate.
     uint8_t cmd[4] = {0x05, 0x20, 0x01, 0x01};
-    PreCommand out[4] = {};
-    wantsPreScanOff(s, r, cmd, sizeof(cmd), out);
-    return wantsScanResume(r, out);
+    OutPacket out[4] = {};
+    parkBeforeCreate(s, r, cmd, sizeof(cmd), out);
+    return restoreAfterCreate(r, out);
 }
 
 int main() {
     // --- 1. Park on an extended create: ext scan + ext adv both switched off, verbatim replay kept.
     {
-        State s = baseState();
-        ScanResumeState r{};
+        Mirror s = baseState();
+        Park r{};
         hostEnablesAll(s, r);
         uint8_t create[11] = {0x43, 0x20, 0x08, 0x00, 0x01, 1,2,3,4,5,6};
-        PreCommand out[4] = {};
-        const int n = wantsPreScanOff(s, r, create, sizeof(create), out);
+        OutPacket out[4] = {};
+        const int n = parkBeforeCreate(s, r, create, sizeof(create), out);
         CHECK(n == 2);                       // ext scan off + ext adv off
-        CHECK(r.suspended && !r.resumePending);
-        CHECK(r.pendingOpcode == kOpLeExtCreateConn);
-        CHECK(r.parkedExtScan && r.parkedExtAdv);
-        CHECK(!r.parkedLegacyScan && !r.parkedLegacyAdv);
-        CHECK(s.extScanEnable == 0 && !s.extAdvEnabled);
-        CHECK(r.extAdvReplayLength == 10 && r.extAdvReplay[0] == 0x39 && r.extAdvReplay[2] == 0x07);
+        CHECK(r.parked && !r.restorePending);
+        CHECK(r.createOpcode == OpLeExtCreateConn);
+        CHECK(r.tookExtScan && r.tookExtAdv);
+        CHECK(!r.tookScan && !r.tookAdv);
+        CHECK(s.extScanOn == 0 && !s.extAdvOn);
+        CHECK(r.advReplaySize == 10 && r.advReplay[0] == 0x39 && r.advReplay[2] == 0x07);
     }
 
     // --- 2. Command Status (0x0f) with an error for the create ends the attempt.
     {
-        State s = baseState();
-        ScanResumeState r{};
+        Mirror s = baseState();
+        Park r{};
         hostEnablesAll(s, r);
         uint8_t create[11] = {0x43, 0x20, 0x08, 0x00, 0x01, 1,2,3,4,5,6};
-        PreCommand out[4] = {};
-        CHECK(wantsPreScanOff(s, r, create, sizeof(create), out) == 2);
+        OutPacket out[4] = {};
+        CHECK(parkBeforeCreate(s, r, create, sizeof(create), out) == 2);
         // Command Status: 0x0f, len 4, status 0x0C, numPackets 1, opcode 0x2043.
         uint8_t evt[6] = {0x0f, 0x04, 0x0C, 0x01, 0x43, 0x20};
-        onScanResumeEvent(r, evt, sizeof(evt));
-        CHECK(r.resumePending);
-        const int n = wantsScanResume(r, out);
+        observeEndingEvent(r, evt, sizeof(evt));
+        CHECK(r.restorePending);
+        const int n = restoreAfterCreate(r, out);
         CHECK(n == 2);
-        CHECK(!r.suspended && !r.resumePending && r.pendingOpcode == 0);
-        CHECK(out[0].data[0] == 0x42 && out[0].data[3] == 1 && out[0].data[4] == 1);  // ext scan restored
-        CHECK(out[1].data[0] == 0x39 && out[1].length == 10);                          // adv replay verbatim
+        CHECK(!r.parked && !r.restorePending && r.createOpcode == 0);
+        CHECK(out[0].bytes[0] == 0x42 && out[0].bytes[3] == 1 && out[0].bytes[4] == 1);  // ext scan restored
+        CHECK(out[1].bytes[0] == 0x39 && out[1].len == 10);                             // adv replay verbatim
     }
 
     // --- 3. Command Status success (0x00) for the create does NOT end the attempt.
     {
-        State s = baseState();
-        ScanResumeState r{};
+        Mirror s = baseState();
+        Park r{};
         hostEnablesAll(s, r);
         uint8_t create[11] = {0x43, 0x20, 0x08, 0x00, 0x01, 1,2,3,4,5,6};
-        PreCommand out[4] = {};
-        wantsPreScanOff(s, r, create, sizeof(create), out);
+        OutPacket out[4] = {};
+        parkBeforeCreate(s, r, create, sizeof(create), out);
         uint8_t evt[6] = {0x0f, 0x04, 0x00, 0x01, 0x43, 0x20};
-        onScanResumeEvent(r, evt, sizeof(evt));
-        CHECK(!r.resumePending);
+        observeEndingEvent(r, evt, sizeof(evt));
+        CHECK(!r.restorePending);
         // ...and a Command Complete error for the same opcode does.
         uint8_t evt2[7] = {0x0e, 0x05, 0x01, 0x43, 0x20, 0x12, 0x00};
-        onScanResumeEvent(r, evt2, sizeof(evt2));
-        CHECK(r.resumePending);
+        observeEndingEvent(r, evt2, sizeof(evt2));
+        CHECK(r.restorePending);
     }
 
     // --- 4. Create Connection Cancel (0x200e) ends the attempt from either command event form.
     {
-        State s = baseState();
-        ScanResumeState r{};
+        Mirror s = baseState();
+        Park r{};
         hostEnablesAll(s, r);
         uint8_t create[11] = {0x43, 0x20, 0x08, 0x00, 0x01, 1,2,3,4,5,6};
-        PreCommand out[4] = {};
-        wantsPreScanOff(s, r, create, sizeof(create), out);
+        OutPacket out[4] = {};
+        parkBeforeCreate(s, r, create, sizeof(create), out);
         uint8_t cancelStatus[6] = {0x0f, 0x04, 0x00, 0x01, 0x0e, 0x20};
-        onScanResumeEvent(r, cancelStatus, sizeof(cancelStatus));
-        CHECK(r.resumePending);
-        wantsScanResume(r, out);
-        CHECK(!r.suspended);
+        observeEndingEvent(r, cancelStatus, sizeof(cancelStatus));
+        CHECK(r.restorePending);
+        restoreAfterCreate(r, out);
+        CHECK(!r.parked);
 
         // Again, via the Command Complete form.
-        ScanResumeState r2{};
+        Park r2{};
         hostEnablesAll(s, r2);
-        wantsPreScanOff(s, r2, create, sizeof(create), out);
+        parkBeforeCreate(s, r2, create, sizeof(create), out);
         uint8_t cancelComplete[7] = {0x0e, 0x05, 0x01, 0x0e, 0x20, 0x02, 0x00};
-        onScanResumeEvent(r2, cancelComplete, sizeof(cancelComplete));
-        CHECK(r2.resumePending);
+        observeEndingEvent(r2, cancelComplete, sizeof(cancelComplete));
+        CHECK(r2.restorePending);
     }
 
     // --- 5. LE meta conn complete still ends the attempt (regression).
     {
-        State s = baseState();
-        ScanResumeState r{};
+        Mirror s = baseState();
+        Park r{};
         hostEnablesAll(s, r);
         uint8_t create[11] = {0x43, 0x20, 0x08, 0x00, 0x01, 1,2,3,4,5,6};
-        PreCommand out[4] = {};
-        wantsPreScanOff(s, r, create, sizeof(create), out);
+        OutPacket out[4] = {};
+        parkBeforeCreate(s, r, create, sizeof(create), out);
         uint8_t meta[8] = {0x3e, 0x06, 0x01, 0x00, 1,2,3,4};
-        onScanResumeEvent(r, meta, sizeof(meta));
-        CHECK(r.resumePending);
+        observeEndingEvent(r, meta, sizeof(meta));
+        CHECK(r.restorePending);
     }
 
     // --- 6. Watchdog: an attempt whose events never come is force-resumed.
     {
-        State s = baseState();
-        ScanResumeState r{};
+        Mirror s = baseState();
+        Park r{};
         hostEnablesAll(s, r);
         uint8_t create[11] = {0x43, 0x20, 0x08, 0x00, 0x01, 1,2,3,4,5,6};
-        PreCommand out[4] = {};
-        CHECK(wantsPreScanOff(s, r, create, sizeof(create), out) == 2);
-        for (uint32_t i = 0; i < kResumeStallCommands - 1; ++i)
+        OutPacket out[4] = {};
+        CHECK(parkBeforeCreate(s, r, create, sizeof(create), out) == 2);
+        for (uint32_t i = 0; i < kStallLimit - 1; ++i)
             CHECK(tickCommand(s, r) == 0);        // one short of the limit: nothing yet
-        CHECK(r.suspended && !r.resumePending);
+        CHECK(r.parked && !r.restorePending);
         const int n = tickCommand(s, r);          // the 128th command fires the watchdog
-        CHECK(n == 2 && r.watchdogFired);
-        CHECK(!r.suspended && r.stallGuard == 0);
-        CHECK(r.resumePending == false);
-        // A late error event after the resume is harmless: nothing is suspended any more.
+        CHECK(n == 2 && r.forcedByWatchdog);
+        CHECK(!r.parked && r.stalledFor == 0);
+        CHECK(r.restorePending == false);
+        // A late error event after the resume is harmless: nothing is parked any more.
         uint8_t evt[6] = {0x0f, 0x04, 0x0C, 0x01, 0x43, 0x20};
-        onScanResumeEvent(r, evt, sizeof(evt));
-        CHECK(!r.resumePending);
+        observeEndingEvent(r, evt, sizeof(evt));
+        CHECK(!r.restorePending);
     }
 
-    // --- 7. Host re-asserting ext scan while suspended: resume restores only the advertising.
+    // --- 7. Host re-asserting ext scan while parked: resume restores only the advertising.
     {
-        State s = baseState();
-        ScanResumeState r{};
+        Mirror s = baseState();
+        Park r{};
         hostEnablesAll(s, r);
         uint8_t create[11] = {0x43, 0x20, 0x08, 0x00, 0x01, 1,2,3,4,5,6};
-        PreCommand out[4] = {};
-        CHECK(wantsPreScanOff(s, r, create, sizeof(create), out) == 2);
+        OutPacket out[4] = {};
+        CHECK(parkBeforeCreate(s, r, create, sizeof(create), out) == 2);
         uint8_t rescan[5] = {0x42, 0x20, 0x02, 0x01, 0x01};
-        CHECK(wantsPreScanOff(s, r, rescan, sizeof(rescan), out) == 0);
-        CHECK(!r.parkedExtScan);              // host took over scanning again
-        CHECK(s.extScanEnable == 1);
+        CHECK(parkBeforeCreate(s, r, rescan, sizeof(rescan), out) == 0);
+        CHECK(!r.tookExtScan);              // host took over scanning again
+        CHECK(s.extScanOn == 1);
         uint8_t evt[6] = {0x0f, 0x04, 0x0C, 0x01, 0x43, 0x20};
-        onScanResumeEvent(r, evt, sizeof(evt));
-        const int n = wantsScanResume(r, out);
+        observeEndingEvent(r, evt, sizeof(evt));
+        const int n = restoreAfterCreate(r, out);
         CHECK(n == 1);                        // only the advertising replay
-        CHECK(out[0].data[0] == 0x39);
-        CHECK(!r.suspended);
+        CHECK(out[0].bytes[0] == 0x39);
+        CHECK(!r.parked);
     }
 
     // --- 8. Legacy create parks only what legacy code had enabled.
     {
-        State s = State{};
-        s.scanEnable = 1; s.scanFilterDup = 1;
-        ScanResumeState r{};
+        Mirror s = Mirror{};
+        s.scanOn = 1; s.scanDup = 1;
+        Park r{};
         uint8_t create[15] = {0x0d, 0x20, 0x0c, 0x20,0x00,0x20,0x00, 0x00, 0x01, 1,2,3,4,5,6};
-        PreCommand out[4] = {};
-        const int n = wantsPreScanOff(s, r, create, sizeof(create), out);
+        OutPacket out[4] = {};
+        const int n = parkBeforeCreate(s, r, create, sizeof(create), out);
         CHECK(n == 1);
-        CHECK(r.pendingOpcode == kOpLeCreateConn);
-        CHECK(r.parkedLegacyScan && !r.parkedExtScan && !r.parkedExtAdv);
+        CHECK(r.createOpcode == OpLeCreateConn);
+        CHECK(r.tookScan && !r.tookExtScan && !r.tookExtAdv);
         uint8_t evt[6] = {0x0f, 0x04, 0x0C, 0x01, 0x0d, 0x20};
-        onScanResumeEvent(r, evt, sizeof(evt));
-        const int n2 = wantsScanResume(r, out);
-        CHECK(n2 == 1 && out[0].data[0] == 0x0c && out[0].data[4] == 1);
+        observeEndingEvent(r, evt, sizeof(evt));
+        const int n2 = restoreAfterCreate(r, out);
+        CHECK(n2 == 1 && out[0].bytes[0] == 0x0c && out[0].bytes[4] == 1);
     }
 
     // --- 9. allowPark=false (2.7.9 default): no park at all, but the mirrors still follow the
     // host's enables, so the witness and any later opt-in park stay correct.
     {
-        State s = State{};
-        ScanResumeState r{};
+        Mirror s = Mirror{};
+        Park r{};
         uint8_t extScanOn[5] = {0x42, 0x20, 0x02, 0x01, 0x01};
-        PreCommand out[4] = {};
-        CHECK(wantsPreScanOff(s, r, extScanOn, sizeof(extScanOn), out, false) == 0);
-        CHECK(s.extScanEnable == 1);
+        OutPacket out[4] = {};
+        CHECK(parkBeforeCreate(s, r, extScanOn, sizeof(extScanOn), out, false) == 0);
+        CHECK(s.extScanOn == 1);
         uint8_t extAdvOn[10] = {0x39, 0x20, 0x07, 0x01, 0x00, 0x00, 0x02, 0x00, 0x7f, 0x00};
-        CHECK(wantsPreScanOff(s, r, extAdvOn, sizeof(extAdvOn), out, false) == 0);
-        CHECK(s.extAdvEnabled);
+        CHECK(parkBeforeCreate(s, r, extAdvOn, sizeof(extAdvOn), out, false) == 0);
+        CHECK(s.extAdvOn);
         uint8_t create[11] = {0x43, 0x20, 0x08, 0x00, 0x01, 1,2,3,4,5,6};
-        CHECK(wantsPreScanOff(s, r, create, sizeof(create), out, false) == 0);
-        CHECK(!r.suspended);
-        CHECK(wantsScanResume(r, out) == 0);   // nothing was parked, nothing to restore
+        CHECK(parkBeforeCreate(s, r, create, sizeof(create), out, false) == 0);
+        CHECK(!r.parked);
+        CHECK(restoreAfterCreate(r, out) == 0);   // nothing was parked, nothing to restore
         // The same create with parking allowed still parks both, proving the switch is the
         // only difference between stock-ish behaviour and the experiment.
-        CHECK(wantsPreScanOff(s, r, create, sizeof(create), out, true) == 2);
+        CHECK(parkBeforeCreate(s, r, create, sizeof(create), out, true) == 2);
     }
 
-    // --- 10. widenCreateScan: the 10 % initiating window becomes the interval, per PHY.
+    // --- 10. widenInitiatorScan: the 10 % initiating window becomes the interval, per PHY.
     {
         // Extended create, PHYs 1M|2M, both asking for 0x01e0/0x0030 (300 ms / 30 ms).
         // Payload: 10 fixed bytes + 14 per PHY, so the 2M scan pair sits at 27/29.
@@ -213,7 +213,7 @@ int main() {
                            0xe0,0x01, 0x30,0x00, 0x18,0x00, 0x28,0x00, 0x00,0x00, 0x48,0x00, 0x00,0x00,
                            0xe0,0x01, 0x30,0x00, 0x18,0x00, 0x28,0x00, 0x00,0x00, 0x48,0x00, 0x00,0x00};
         uint32_t observed = 0;
-        CHECK(widenCreateScan(ext, sizeof(ext), &observed));
+        CHECK(widenInitiatorScan(ext, sizeof(ext), &observed));
         CHECK(observed == ((0x01e0u << 16) | 0x0030u));
         CHECK(ext[15] == 0xe0 && ext[16] == 0x01);   // 1M window widened
         CHECK(ext[29] == 0xe0 && ext[30] == 0x01);   // 2M window widened
@@ -223,15 +223,15 @@ int main() {
         // Already continuous: nothing to do.
         uint8_t same[42] = {0x43, 0x20, 38, 0x01, 0x00, 0x01, 0,0,0,0,0,0, 0x01,
                             0xe0,0x01, 0xe0,0x01, 0x18,0x00, 0x28,0x00, 0x00,0x00, 0x48,0x00, 0x00,0x00};
-        CHECK(!widenCreateScan(same, sizeof(same), &observed));
+        CHECK(!widenInitiatorScan(same, sizeof(same), &observed));
         CHECK(observed == ((0x01e0u << 16) | 0x01e0u));
         // Legacy create carries the same two fields at the head of its payload.
         uint8_t legacy[16] = {0x0d, 0x20, 0x0c, 0xe0,0x01, 0x30,0x00, 0x00, 0x00, 0,0,0,0,0,0, 0x00};
-        CHECK(widenCreateScan(legacy, sizeof(legacy), &observed));
+        CHECK(widenInitiatorScan(legacy, sizeof(legacy), &observed));
         CHECK(legacy[5] == 0xe0 && legacy[6] == 0x01);
         // Anything else is left alone.
         uint8_t scan[5] = {0x42, 0x20, 0x02, 0x01, 0x01};
-        CHECK(!widenCreateScan(scan, sizeof(scan), &observed));
+        CHECK(!widenInitiatorScan(scan, sizeof(scan), &observed));
     }
 
     // --- 11. Continuity witness: find the 0x0d invite the Mac transmits and the 0x0e answer.
@@ -241,38 +241,38 @@ int main() {
         uint8_t legacyAdv[18] = {0x08, 0x20, 15,
                                  0x02, 0x01, 0x06,
                                  0x0b, 0xff, 0x4c, 0x00, 0x0d, 0x01, 0x67, 0xf3, 0x6d, 0x01, 0x00, 0x00};
-        AdvPayload payload {};
-        CHECK(advPayload(legacyAdv, sizeof(legacyAdv), &payload));
+        PayloadRange payload {};
+        CHECK(payloadRange(legacyAdv, sizeof(legacyAdv), &payload));
         CHECK(payload.offset == 3 && payload.length == 15);
         uint32_t mask = 0;
-        CHECK(continuityTypes(legacyAdv + payload.offset, payload.length, &mask) == 0x0d);
+        CHECK(appleTypeIds(legacyAdv + payload.offset, payload.length, &mask) == 0x0d);
         CHECK(mask == 1u << 0x0d);
 
         // Extended form (0x2037) adds handle, fragment operation and preference before the data.
         uint8_t extAdv[19] = {0x37, 0x20, 16, 0x00, 0x03, 0x01, 12,
                               0x0b, 0xff, 0x4c, 0x00, 0x0e, 0x06, 0x01, 0x00, 0x5e, 0x00, 0x06, 0x03};
-        CHECK(advPayload(extAdv, sizeof(extAdv), &payload));
+        CHECK(payloadRange(extAdv, sizeof(extAdv), &payload));
         CHECK(payload.offset == 7 && payload.length == 12);
         mask = 0;
-        CHECK(continuityTypes(extAdv + payload.offset, payload.length, &mask) == 0x0e);
+        CHECK(appleTypeIds(extAdv + payload.offset, payload.length, &mask) == 0x0e);
         CHECK(mask == 1u << 0x0e);
 
         // A non-Apple company id in the same field type must not be mistaken for Continuity.
         uint8_t otherCompany[8] = {0x08, 0x20, 5, 0x04, 0xff, 0x06, 0x00, 0x01};
-        CHECK(advPayload(otherCompany, sizeof(otherCompany), &payload));
+        CHECK(payloadRange(otherCompany, sizeof(otherCompany), &payload));
         mask = 0;
-        CHECK(continuityTypes(otherCompany + payload.offset, payload.length, &mask) == 0xff);
+        CHECK(appleTypeIds(otherCompany + payload.offset, payload.length, &mask) == 0xff);
         CHECK(mask == 0);
 
         // A length byte that claims more than the buffer holds stops the walk, no overrun.
         uint8_t truncated[6] = {0x08, 0x20, 3, 0x09, 0xff, 0x4c};
         mask = 0;
-        CHECK(continuityTypes(truncated + 3, 3, &mask) == 0xff);
+        CHECK(appleTypeIds(truncated + 3, 3, &mask) == 0xff);
         CHECK(mask == 0);
 
         // A command that is neither advertising-data opcode is rejected outright.
         uint8_t notAdv[8] = {0x0a, 0x20, 5, 0x01, 0x00, 0x00, 0x00, 0x00};
-        CHECK(!advPayload(notAdv, sizeof(notAdv), &payload));
+        CHECK(!payloadRange(notAdv, sizeof(notAdv), &payload));
 
         // Two reports in one LE Meta Event 0x02: a connectable ADV_IND and a phone's 0x0e.
         uint8_t report[39] = {0x3e, 0x00, 0x02, 2,
@@ -280,8 +280,8 @@ int main() {
                               0x03, 0x01, 11, 12, 13, 14, 15, 16, 12,
                               0x0b, 0xff, 0x4c, 0x00, 0x0e, 0x06, 0x01, 0x00, 0x5e, 0x00, 0x06, 0x03,
                               0xc0};
-        AdvReportItem items[4] {};
-        CHECK(advReportItems(report, sizeof(report), items, 4) == 2);
+        Report items[4] {};
+        CHECK(parseReports(report, sizeof(report), items, 4) == 2);
         CHECK(items[0].eventType == 0x00);          // connectable: ADV_IND
         CHECK(items[0].appleTypes == 0);
         CHECK(items[0].addr[0] == 1 && items[0].rssi == 0xd0);
@@ -291,44 +291,44 @@ int main() {
 
         // Another subevent, and a buffer that ends mid-report, must both be handled safely.
         uint8_t notReport[6] = {0x3e, 0x02, 0x01, 0x00, 0x01, 0x00};
-        CHECK(advReportItems(notReport, sizeof(notReport), items, 4) == 0);
-        CHECK(advReportItems(report, 30, items, 4) == 1);
+        CHECK(parseReports(notReport, sizeof(notReport), items, 4) == 0);
+        CHECK(parseReports(report, 30, items, 4) == 1);
     }
 
     // 12: connection-path fingerprint. Every opcode here is one bluetoothd may or may not use,
     // and the whole point is telling them apart, so a wrong mapping silently invents a path
     // that was never taken.
     {
-        CHECK(opFingerprint(0x200d) == kFpLegacyCreate);
-        CHECK(opFingerprint(0x2043) == kFpExtCreate);
-        CHECK(opFingerprint(0x2010) == kFpAcceptListClear);
-        CHECK(opFingerprint(0x2011) == kFpAcceptListAdd);
-        CHECK(opFingerprint(0x2012) == kFpAcceptListRemove);
-        CHECK(opFingerprint(0x2027) == kFpResolvingAdd);
-        CHECK(opFingerprint(0x2028) == kFpResolvingRemove);
-        CHECK(opFingerprint(0x2029) == kFpResolvingClear);
-        CHECK(opFingerprint(0x202d) == kFpResolvingSize);
-        CHECK(opFingerprint(0x200f) == kFpAcceptListSize);
-        CHECK(opFingerprint(0x2036) == kFpExtAdvParams);
-        CHECK(opFingerprint(0x2037) == kFpExtAdvData);
-        CHECK(opFingerprint(0x2039) == kFpExtAdvEnable);
-        CHECK(opFingerprint(0x2006) == kFpAdvParams);
-        CHECK(opFingerprint(0x200a) == kFpAdvEnable);
-        CHECK(opFingerprint(0x200c) == kFpScanEnable);
-        CHECK(opFingerprint(0x2042) == kFpExtScanEnable);
-        CHECK(opFingerprint(0x2005) == kFpRandomAddress);
-        CHECK(opFingerprint(0x2035) == kFpAdvSetRandomAddress);
-        CHECK(opFingerprint(0x2013) == kFpConnUpdate);
-        CHECK(opFingerprint(0x200e) == kFpCreateCancel);
-        CHECK(opFingerprint(0x2016) == kFpReadRemoteFeatures);
+        CHECK(fingerprintOf(0x200d) == FpLegacyCreate);
+        CHECK(fingerprintOf(0x2043) == FpExtCreate);
+        CHECK(fingerprintOf(0x2010) == FpAcceptClear);
+        CHECK(fingerprintOf(0x2011) == FpAcceptAdd);
+        CHECK(fingerprintOf(0x2012) == FpAcceptRemove);
+        CHECK(fingerprintOf(0x2027) == FpResolvingAdd);
+        CHECK(fingerprintOf(0x2028) == FpResolvingRemove);
+        CHECK(fingerprintOf(0x2029) == FpResolvingClear);
+        CHECK(fingerprintOf(0x202d) == FpResolvingSize);
+        CHECK(fingerprintOf(0x200f) == FpAcceptSize);
+        CHECK(fingerprintOf(0x2036) == FpExtAdvParams);
+        CHECK(fingerprintOf(0x2037) == FpExtAdvData);
+        CHECK(fingerprintOf(0x2039) == FpExtAdvEnable);
+        CHECK(fingerprintOf(0x2006) == FpAdvParams);
+        CHECK(fingerprintOf(0x200a) == FpAdvEnable);
+        CHECK(fingerprintOf(0x200c) == FpScanEnable);
+        CHECK(fingerprintOf(0x2042) == FpExtScanEnable);
+        CHECK(fingerprintOf(0x2005) == FpOwnRandomAddr);
+        CHECK(fingerprintOf(0x2035) == FpAdvSetRandomAddr);
+        CHECK(fingerprintOf(0x2013) == FpConnUpdate);
+        CHECK(fingerprintOf(0x200e) == FpCreateCancel);
+        CHECK(fingerprintOf(0x2016) == FpRemoteFeatures);
         // 0x2038 extended scan parameters must not be confused with 0x200b legacy ones.
-        CHECK(opFingerprint(0x2038) == kFpExtScanParams);
-        CHECK(opFingerprint(0x200b) == kFpScanParams);
-        CHECK(opFingerprint(0x2038) != opFingerprint(0x200b));
+        CHECK(fingerprintOf(0x2038) == FpExtScanParams);
+        CHECK(fingerprintOf(0x200b) == FpScanParams);
+        CHECK(fingerprintOf(0x2038) != fingerprintOf(0x200b));
         // Everything outside the fingerprint set stays out of the mask.
-        CHECK(opFingerprint(0x0c03) == 0);
-        CHECK(opFingerprint(0x2001) == 0);
-        CHECK(opFingerprint(0x0000) == 0);
+        CHECK(fingerprintOf(0x0c03) == 0);
+        CHECK(fingerprintOf(0x2001) == 0);
+        CHECK(fingerprintOf(0x0000) == 0);
         // No two opcodes may share a bit, or one path would masquerade as another.
         const uint16_t ops[] = {0x200d,0x2043,0x2010,0x2011,0x2012,0x2027,0x2028,0x2029,0x202d,
                                 0x200f,0x2036,0x2037,0x2039,0x2006,0x200a,0x200c,0x2042,0x2005,
@@ -336,7 +336,7 @@ int main() {
         uint32_t unionBits = 0;
         unsigned distinct = 0;
         for (uint16_t op : ops) {
-            const uint32_t bit = opFingerprint(op);
+            const uint32_t bit = fingerprintOf(op);
             CHECK(bit && !(unionBits & bit));
             if (bit && !(unionBits & bit))
                 ++distinct;
@@ -354,102 +354,102 @@ int main() {
         const uint8_t reset[3] = {0x03, 0x0c, 0x00};
 
         // Guards: no buffer, too short, not the command, no handle in the payload.
-        DataLengthState s{};
-        CHECK(extraRemoteReads(s, nullptr, 5, t0) == 0);
-        CHECK(extraRemoteReads(s, readFeaturesA, 4, t0) == 0);
-        CHECK(extraRemoteReads(s, reset, sizeof(reset), t0) == 0);
+        FeatureBoard s{};
+        CHECK(duplicateReads(s, nullptr, 5, t0) == 0);
+        CHECK(duplicateReads(s, readFeaturesA, 4, t0) == 0);
+        CHECK(duplicateReads(s, reset, sizeof(reset), t0) == 0);
         const uint8_t other[5] = {0x15, 0x20, 0x02, 0x34, 0x12};          // 0x2015, not 0x2016
-        CHECK(extraRemoteReads(s, other, 5, t0) == 0);
+        CHECK(duplicateReads(s, other, 5, t0) == 0);
         const uint8_t noHandle[3] = {0x16, 0x20, 0x00};
-        CHECK(extraRemoteReads(s, noHandle, 3, t0) == 0);
-        CHECK(!dataLengthPending(s));
+        CHECK(duplicateReads(s, noHandle, 3, t0) == 0);
+        CHECK(!roundPending(s));
 
         // Arming sends two copies and records the handle; a controller start forgets everything.
-        CHECK(extraRemoteReads(s, readFeaturesA, 5, t0) == 2);
-        CHECK(dataLengthPending(s));
-        CHECK(extraRemoteReads(s, reset, sizeof(reset), t0) == 0);
-        CHECK(!dataLengthPending(s));
+        CHECK(duplicateReads(s, readFeaturesA, 5, t0) == 2);
+        CHECK(roundPending(s));
+        CHECK(duplicateReads(s, reset, sizeof(reset), t0) == 0);
+        CHECK(!roundPending(s));
 
         // Per-handle: two links arming at once must not share a stage, or the fake events carry the
         // wrong handle. A's real completion stays untouched, then A's duplicates are rewritten.
-        CHECK(extraRemoteReads(s, readFeaturesA, 5, t0) == 2);
-        CHECK(extraRemoteReads(s, readFeaturesB, 5, t0) == 2);
+        CHECK(duplicateReads(s, readFeaturesA, 5, t0) == 2);
+        CHECK(duplicateReads(s, readFeaturesB, 5, t0) == 2);
         // Each event arrives in its own buffer, so every call starts from the controller's bytes.
         const uint8_t realA[12] = {0x3e, 0x0c, 0x04, 0x00, 0x34, 0x12, 0x41, 0x42, 0x43, 0x44, 0x45, 0x46};
         const uint8_t realB[12] = {0x3e, 0x0c, 0x04, 0x00, 0x78, 0x56, 0x41, 0x42, 0x43, 0x44, 0x45, 0x46};
         uint8_t eventA[16], eventB[16];
         memset(eventA, 0xcc, sizeof(eventA)); memcpy(eventA, realA, 12);
-        CHECK(rewriteEvent(s, eventA, 12) == 12);                 // A's real completion, unchanged
+        CHECK(forgeEvent(s, eventA, 12) == 12);                 // A's real completion, unchanged
         memset(eventB, 0xcc, sizeof(eventB)); memcpy(eventB, realB, 12);
-        CHECK(rewriteEvent(s, eventB, 12) == 12);                 // B is still waiting for its own
+        CHECK(forgeEvent(s, eventB, 12) == 12);                 // B is still waiting for its own
         memset(eventA, 0xcc, sizeof(eventA)); memcpy(eventA, realA, 12);
-        CHECK(rewriteEvent(s, eventA, 12) == kPhyUpdateEventLength);
+        CHECK(forgeEvent(s, eventA, 12) == kPhyUpdateLen);
         CHECK(eventA[2] == 0x0c && eventA[4] == 0x34 && eventA[5] == 0x12);
         memset(eventA, 0xcc, sizeof(eventA)); memcpy(eventA, realA, 12);
-        CHECK(rewriteEvent(s, eventA, 12) == kDataLengthEventLength);
+        CHECK(forgeEvent(s, eventA, 12) == kDataLengthLen);
         CHECK(eventA[2] == 0x07 && eventA[3] == 0x34 && eventA[4] == 0x12);
         memset(eventA, 0xcc, sizeof(eventA)); memcpy(eventA, realA, 12);
-        CHECK(rewriteEvent(s, eventA, 12) == 12);                 // A's round is over
-        CHECK(dataLengthPending(s));                              // B still has one
-        CHECK(extraRemoteReads(s, reset, sizeof(reset), t0) == 0);
-        CHECK(!dataLengthPending(s));
+        CHECK(forgeEvent(s, eventA, 12) == 12);                 // A's round is over
+        CHECK(roundPending(s));                              // B still has one
+        CHECK(duplicateReads(s, reset, sizeof(reset), t0) == 0);
+        CHECK(!roundPending(s));
 
         // A duplicate that can't be sent is forgotten by handle, not globally.
-        CHECK(extraRemoteReads(s, readFeaturesA, 5, t0) == 2);
-        CHECK(extraRemoteReads(s, readFeaturesB, 5, t0) == 2);
-        forgetRemoteRead(s, readFeaturesA, 5);
-        CHECK(extraRemoteReads(s, readFeaturesA, 5, t0) == 2);    // A re-arms (one slot was freed)
+        CHECK(duplicateReads(s, readFeaturesA, 5, t0) == 2);
+        CHECK(duplicateReads(s, readFeaturesB, 5, t0) == 2);
+        dropDuplicate(s, readFeaturesA, 5);
+        CHECK(duplicateReads(s, readFeaturesA, 5, t0) == 2);    // A re-arms (one slot was freed)
         // B's entry is untouched: its real completion still passes through, then rewrites.
         memset(eventB, 0xcc, sizeof(eventB)); memcpy(eventB, realB, 12);
-        CHECK(rewriteEvent(s, eventB, 12) == 12);
+        CHECK(forgeEvent(s, eventB, 12) == 12);
         memset(eventB, 0xcc, sizeof(eventB)); memcpy(eventB, realB, 12);
-        CHECK(rewriteEvent(s, eventB, 12) == kPhyUpdateEventLength);
-        CHECK(extraRemoteReads(s, reset, sizeof(reset), t0) == 0);
+        CHECK(forgeEvent(s, eventB, 12) == kPhyUpdateLen);
+        CHECK(duplicateReads(s, reset, sizeof(reset), t0) == 0);
 
         // Expiry: an entry whose events never arrive is given up after 2 s, so nothing waits forever.
-        CHECK(extraRemoteReads(s, readFeaturesA, 5, t0) == 2);
-        CHECK(wrapRead(s, t0 + 1000000ULL, 64));                  // 1 ms later, still waiting
-        CHECK(!wrapRead(s, t0 + kDataLengthExpiryNs + 1, 64));    // past the expiry
+        CHECK(duplicateReads(s, readFeaturesA, 5, t0) == 2);
+        CHECK(takeWrap(s, t0 + 1000000ULL, 64));                  // 1 ms later, still waiting
+        CHECK(!takeWrap(s, t0 + kRoundExpiryNs + 1, 64));    // past the expiry
         CHECK(s.expired == 1);
-        CHECK(!dataLengthPending(s));
+        CHECK(!roundPending(s));
         // The counters survive the controller start that also clears the table.
         const uint32_t expiredBefore = s.expired;
-        CHECK(extraRemoteReads(s, reset, sizeof(reset), t0) == 0);
+        CHECK(duplicateReads(s, reset, sizeof(reset), t0) == 0);
         CHECK(s.expired == expiredBefore);
 
         // Bounded wrapping: a round that never matches may not keep every read of the event pipe
         // wrapped. After the budget, the round is dropped instead of hijacking the pipe forever.
-        DataLengthState w{};
-        CHECK(extraRemoteReads(w, readFeaturesA, 5, t0) == 2);
-        CHECK(!wrapRead(w, t0, 5));                               // buffer can't hold the event
+        FeatureBoard w{};
+        CHECK(duplicateReads(w, readFeaturesA, 5, t0) == 2);
+        CHECK(!takeWrap(w, t0, 5));                               // buffer can't hold the event
         unsigned wrapped = 0;
-        while (wrapRead(w, t0, 64))
+        while (takeWrap(w, t0, 64))
             ++wrapped;
-        CHECK(wrapped == kMaxWrappedReads);
+        CHECK(wrapped == kWrapBudget);
         CHECK(w.aborts == 1);
-        CHECK(!dataLengthPending(w));
-        CHECK(!wrapRead(w, t0, 64));                              // nothing left to wrap for
+        CHECK(!roundPending(w));
+        CHECK(!takeWrap(w, t0, 64));                              // nothing left to wrap for
 
         // A new round restores the budget, so the second link isn't starved by the first one.
-        CHECK(extraRemoteReads(w, readFeaturesB, 5, t0) == 2);
-        CHECK(wrapRead(w, t0, 64));
+        CHECK(duplicateReads(w, readFeaturesB, 5, t0) == 2);
+        CHECK(takeWrap(w, t0, 64));
         CHECK(w.wrapped == 1);
 
         // Every slot busy: no copies are sent, so that link behaves as if the fix weren't there
         // rather than overwriting another link's state.
-        DataLengthState full{};
-        for (unsigned i = 0; i < kDataLengthLinks; ++i) {
+        FeatureBoard full{};
+        for (unsigned i = 0; i < kFeatureSlots; ++i) {
             const uint8_t cmd[5] = {0x16, 0x20, 0x02, uint8_t(i), 0x00};
-            CHECK(extraRemoteReads(full, cmd, 5, t0) == 2);
+            CHECK(duplicateReads(full, cmd, 5, t0) == 2);
         }
         const uint8_t ninth[5] = {0x16, 0x20, 0x02, 0x7f, 0x00};
-        CHECK(extraRemoteReads(full, ninth, 5, t0) == 0);
+        CHECK(duplicateReads(full, ninth, 5, t0) == 0);
 
         // Events for a link nobody is waiting for pass through byte for byte.
         uint8_t stranger[16] = {0x3e, 0x0c, 0x04, 0x00, 0xaa, 0xbb, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06};
         uint8_t copy[16];
         memcpy(copy, stranger, sizeof(copy));
-        CHECK(rewriteEvent(full, stranger, 12) == 12);
+        CHECK(forgeEvent(full, stranger, 12) == 12);
         CHECK(memcmp(stranger, copy, sizeof(copy)) == 0);
     }
 

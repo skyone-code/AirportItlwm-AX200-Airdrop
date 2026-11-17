@@ -2,9 +2,9 @@
 // The HCI hook follows IntelBTPatcher (OpenIntelWireless/IntelBluetoothFirmware, GPLv3),
 // the page hook follows BlueToolFixup (acidanthera/BrcmPatchRAM).
 //
-// Separate Lilu plugin: lets bluetoothd use extended LE advertising on a third-party
-// controller. It only patches a process in memory, and does nothing without its boot
-// flag. See docs/HOW-IT-WORKS.md. Nothing on disk changes.
+// A separate Lilu plugin that lets bluetoothd use extended LE advertising on a third-party
+// controller. It only rewrites a process in memory and stays idle without its boot flag; nothing
+// on disk changes.
 #include <Headers/kern_api.hpp>
 #include <Headers/kern_user.hpp>
 #include <Headers/kern_util.hpp>
@@ -16,219 +16,223 @@
 #include "IntelBTPatcherPatches.hpp"
 #include "IntelBTPatcherHci.hpp"
 
-// Patches bluetoothd's pages as they're validated, the same way BlueToolFixup does.
-// Lilu's onProcLoad route was tried first and didn't apply to this process.
-static mach_vm_address_t orig_cs_validate {};
-static bool patchScanning {};
-// Defined further down with the rest of the telemetry; the page hook publishes to it from here.
-static void noteHook(const char *key, uint32_t value);
-// Parking is opt-in since 2.7.9 (see wantsPreScanOff): off by default because it never made a
-// create succeed and it demonstrably killed Instant Hotspot by switching off the advertising
-// the phone needs to see. Add -ibtppark to bring the experiment back.
-static bool parkScanning {};
-// Both HCI interventions are opt-in, so the default build behaves exactly like upstream
-// IntelBTPatcher 0.9.1: no park, no rewrite of the host's own create command. The reason is
-// field evidence, not caution in the abstract — the feature they were written for (Instant
-// Hotspot) is listed as unimplemented in upstream's ROADMAP under "Later", so the failures
-// they were meant to cure are the expected baseline here, not a regression to chase. Add
-// -ibtpwiden to experiment with the widened initiating-scan window.
-static bool widenScan {};
-// -ibtpprivacy: OR the LL Privacy bit (bit 6, LE feature word byte 0) into the answer of
-// LE Read Local Supported Features (0x2003). Observation is unconditional; the rewrite only
-// happens with the flag. bluetoothd uses the controller's resolving list only when this bit
-// is set, and it never is on this controller — which is exactly why every outgoing create
-// with filter policy 1 scans six seconds and dies: the accept list holds identity (Public)
-// addresses while every peer advertises with an RPA (Random) nobody can resolve.
-static bool privacyFix {};
+// ---- boot switches ---------------------------------------------------------------------
+// The page rewrites run unless -btlenoscan is given; everything else here is opt-in.
+static bool scanPatchOn {};
+// Parking: off since 2.7.9. It never made a create succeed and it demonstrably killed Instant
+// Hotspot by switching off the advertising the phone has to see. -ibtppark brings it back.
+static bool parkOn {};
+// Both HCI interventions are opt-in so the default build behaves like upstream 0.9.1: no park, no
+// rewrite of the host's own create command. That is field evidence, not caution in the abstract -
+// the feature they were written for is listed as unimplemented in upstream's ROADMAP, so these
+// failures are the expected baseline rather than a regression of ours. -ibtpwiden experiments with
+// the widened initiating window.
+static bool widenOn {};
+// -ibtpprivacy: OR the LL Privacy bit (bit 6 of the feature word) into the answer to LE Read Local
+// Supported Features. Observation always happens; the rewrite needs the flag. bluetoothd only uses
+// the controller's resolving list when that bit is set, and on this controller it never is - which
+// is why every create with filter policy 1 scans six seconds and dies: the accept list holds
+// identity addresses while peers advertise with a resolvable private address nobody can resolve.
+static bool privacyOn {};
 
-static void patched_cs_validate_page(vnode_t vp, memory_object_t pager, memory_object_offset_t page_offset,
-                                     const void *data, int *validated_p, int *tainted_p, int *nx_p) {
-    char path[PATH_MAX];
-    int pathlen = PATH_MAX;
-    FunctionCast(patched_cs_validate_page, orig_cs_validate)(vp, pager, page_offset, data, validated_p, tainted_p, nx_p);
-    if (vn_getpath(vp, path, &pathlen) != 0 || LIKELY(strcmp(path, "/usr/sbin/bluetoothd") != 0))
-        return;
-    // Each set only matches its own bluetoothd build; on any other build nothing changes.
-    for (const auto &patch : Ibtp::kPatches)
-        if (!patch.scanningOnly || patchScanning)
-            KernelPatcher::findAndReplace(const_cast<void *>(data), PAGE_SIZE, patch.find, patch.size,
-                                          patch.replace, patch.size);
+// ---- telemetry -------------------------------------------------------------------------
+// Evidence for tests, in the I/O Registry root. Written only on rare events, in thread context.
+static void publishValue(const char *key, uint32_t value) {
+    IORegistryEntry::getRegistryRoot()->setProperty(key, value, 32);
 }
-
-// bluetoothd talks to the controller over USB control requests. Commands it doesn't send in
-// the required order are added here, after the command they depend on. Their completion
-// events reach bluetoothd as unmatched, as they already do for IntelBTPatcher's command.
-static mach_vm_address_t orig_device_request {};
-// deviceRequest runs on many threads at once. hciState is only read or changed with hciLock held,
-// never across a USB call, and belongs to the one controller in hciOwner.
-static Ibtp::State hciState {};
-static IOLock *hciLock {};
-static void *hciOwner {};
-// An added command never waits longer than this, even when the caller's request had no timeout.
-static constexpr uint32_t kExtraTimeoutMS = 1000;
-
-// The LE Data Length Change fix (OpenIntelWireless#514) needs the controller's interrupt IN pipe,
-// which is only reachable through IOUSBHostPipe: the pipe is remembered when it's created.
-static mach_vm_address_t orig_pipe_io {};
-static mach_vm_address_t orig_init_pipe {};
-static mach_vm_address_t orig_init_pipe_config {};
-static void *interruptPipe {};
-// Written when a command goes out (any thread) and read when an interrupt read is submitted or
-// completes (the USB workloop). lengthLock is a spinlock held only around the table itself: never
-// across a USB call, an allocation or a registry write. Taken after hciLock when both are needed,
-// never before. Entries are per connection handle and expire after 2 s.
-static Ibtp::DataLengthState lengthState {};
-static IOSimpleLock *lengthLock {};
-static uint32_t lengthRewrites {}, lengthFailures {}, lengthExpiredSeen {}, lengthAbortsSeen {};
-static uint32_t bumpCounter(uint32_t &counter) { return __atomic_add_fetch(&counter, 1, __ATOMIC_RELAXED); }
-static uint64_t nowNanoseconds() {
+static uint32_t bump(uint32_t &counter) { return __atomic_add_fetch(&counter, 1, __ATOMIC_RELAXED); }
+// Publishes a counter that changed, outside the spinlock, since a registry write allocates.
+static void publishIfChanged(const char *key, uint32_t value, uint32_t &seen) {
+    if (value != __atomic_load_n(&seen, __ATOMIC_RELAXED)) {
+        __atomic_store_n(&seen, value, __ATOMIC_RELAXED);
+        publishValue(key, value);
+    }
+}
+static uint64_t monotonicNs() {
     uint64_t now = 0;
     absolutetime_to_nanoseconds(mach_absolute_time(), &now);
     return now;
 }
-// Scanning parked for an LE Create Connection, restored once the attempt ends. Written on the
-// USB workloop (event side), read on the callers' threads (command side); same benign-race
-// reasoning as lengthState above.
-static Ibtp::ScanResumeState scanResume {};
-static uint32_t scanSuspends {}, scanResumes {}, scanResumeFails {}, leCreates {}, watchdogResumes {}, unexpectedParks {},
-    widenedCreates {}, widenSkipped {};
-// The controller's own LE feature word from LE Read Local Supported Features (0x2003), as a
-// 64-bit value, published once at startup. Bit 6 of byte 0 is LL Privacy.
-static uint64_t lastLEFeatures {};
-static uint32_t leFeatureReads {}, privacyRewrites {}, featureWriteFails {};
-// The answer to 0x2003 usually lands on a read nothing else wraps (no data-length round armed, no
-// park open). The pipe it comes in on cannot be named either: routing IOUSBHostPipe::init* failed
-// on this build (PipeHooks lacks bit 1), so interruptPipe is never captured and no read is ever
-// wrapped. A bounded window instead: reads are taken over for a wall-clock span or a read count,
-// whichever comes first, and passed through untouched unless they carry the answer. It is armed at
-// load, not only when the ask shows up — the ask rides a host command this hook may never see, and
-// waiting for it meant an 800 ms window opened on nothing and captured nothing. Twenty seconds covers
-// the whole early HCI init; every ask seen afterwards re-arms it shorter, right where the answer is due.
-enum : uint32_t { kFeatureWatchReads = 8000 };
-enum : uint64_t { kFeatureWatchNs = 20000000000ULL };
-enum : uint64_t { kFeatureRearmNs = 3000000000ULL };
-static uint32_t featureWatchReads {}, featureAsks {}, featureWraps {};
-static uint64_t featureWatchArmedNs {};
-// How long the window opened at that instant lasts: the load-time watch is wide, each ask shortens it
-// to just around the answer.
-static uint64_t featureWatchSpanNs { kFeatureWatchNs };
-// Live view of what the mirror believes: bit0 legacy scan, bit8 extended scan, bit16 legacy
-// advertising, bit24 extended advertising. Written only when it changes, so a desync between
-// the kext and the radio is visible in ioreg instead of having to be inferred.
-static uint32_t lastMirrorBits = 0xffffffff;
-static void observeMirrors(const Ibtp::State &s) {
-    const uint32_t bits = uint32_t(s.scanEnable) | uint32_t(s.extScanEnable) << 8 |
-                          uint32_t(s.legacyAdvEnabled) << 16 | uint32_t(s.extAdvEnabled) << 24;
-    if (bits == lastMirrorBits)
+
+// ---- bluetoothd page rewrites ----------------------------------------------------------
+// Applied as the pages are validated, the way BlueToolFixup does it. Lilu's onProcLoad route was
+// tried first and never applied to this process.
+static mach_vm_address_t csValidateOrig {};
+static void csValidatePageHook(vnode_t vp, memory_object_t pager, memory_object_offset_t page_offset,
+                               const void *data, int *validated_p, int *tainted_p, int *nx_p) {
+    char path[PATH_MAX];
+    int pathlen = PATH_MAX;
+    FunctionCast(csValidatePageHook, csValidateOrig)(vp, pager, page_offset, data, validated_p, tainted_p, nx_p);
+    if (vn_getpath(vp, path, &pathlen) != 0 || LIKELY(strcmp(path, "/usr/sbin/bluetoothd") != 0))
         return;
-    lastMirrorBits = bits;
+    // Each set matches its own bluetoothd build only, so on any other build nothing happens.
+    for (const Ibtp::RewriteSet &set : Ibtp::kSets)
+        for (size_t i = 0; i < set.count; ++i) {
+            const Ibtp::Rewrite &site = set.items[i];
+            if (!site.scanOnly || scanPatchOn)
+                KernelPatcher::findAndReplace(const_cast<void *>(data), PAGE_SIZE, site.from, site.length,
+                                              site.to, site.length);
+        }
+}
+
+// ---- HCI over USB control requests -----------------------------------------------------
+// bluetoothd talks to the controller through USB control requests. Commands it does not send in the
+// order the controller needs them are added here, right after the command they depend on. Their
+// completion events reach bluetoothd unmatched, exactly as IntelBTPatcher's command does.
+static mach_vm_address_t deviceRequestOrig {};
+// deviceRequest runs on many threads at once. mirror is only read or written with mirrorLock held,
+// never across a USB call, and belongs to the one controller in mirrorOwner.
+static Ibtp::Mirror mirror {};
+static IOLock *mirrorLock {};
+static void *mirrorOwner {};
+// An added command never waits longer than this, even when the caller's own request had no timeout.
+static constexpr uint32_t kAddedTimeoutMs = 1000;
+
+// The LE Data Length Change fix needs the controller's interrupt IN pipe, which only IOUSBHostPipe
+// can reach, so the pipe is remembered as it is created.
+static mach_vm_address_t pipeIoOrig {};
+static mach_vm_address_t initPipeOrig {};
+static mach_vm_address_t initPipeConfigOrig {};
+static void *eventPipe {};
+// Written when a command goes out (any thread), read when an interrupt read is submitted or
+// completes (the USB workloop). featureLock is a spinlock held only around the board itself: never
+// across a USB call, an allocation or a registry write. It is taken after mirrorLock, never before.
+static Ibtp::FeatureBoard features {};
+static IOSimpleLock *featureLock {};
+static uint32_t forgeWrites {}, forgeWriteFails {}, expiredSeen {}, abortsSeen {};
+
+// Scanning parked for an LE Create Connection and put back once the attempt ends. Written on the USB
+// workloop (event side), read on the callers' threads (command side); same benign-race reasoning as
+// the feature board.
+static Ibtp::Park park {};
+static uint32_t parksMade {}, parksLifted {}, parkSendFails {}, createsSeen {}, watchdogLifts {},
+    strayParks {}, widened {}, widenMissed {};
+// The controller's own LE feature word, from LE Read Local Supported Features, published once.
+static uint64_t featureWord {};
+static uint32_t featureReads {}, privacyPatched {}, featureWriteFails {};
+// The answer to 0x2003 usually lands on a read nothing else wraps: no data-length round armed, no
+// park open. The pipe it arrives on cannot be named either, since routing IOUSBHostPipe::init* fails
+// on this build (PipeHooks lacks bit 1), so eventPipe is never captured and no read is wrapped. A
+// bounded window instead: reads are taken over for a wall-clock span or a read count, whichever
+// comes first, and passed through untouched unless they carry the answer. It is armed at load
+// rather than when the ask appears, because the ask rides a host command this hook may never see.
+enum : uint32_t { kWatchReads = 8000 };
+enum : uint64_t { kWatchSpanNs = 20000000000ULL, kWatchRearmNs = 3000000000ULL };
+static uint32_t watchBudget {}, featureAsks {}, watchWraps {};
+static uint64_t watchArmedNs {};
+// How long a window opened at that instant lasts: the load-time one is wide, every ask narrows it to
+// just around the answer.
+static uint64_t watchSpanNs { kWatchSpanNs };
+// What the mirror believes, as one word: bit 0 legacy scan, bit 8 extended scan, bit 16 legacy
+// advertising, bit 24 extended advertising. Written only when it changes, so a desync between the
+// kext and the radio shows up in ioreg instead of having to be inferred.
+static uint32_t mirrorBits = 0xffffffff;
+static void publishMirrors(const Ibtp::Mirror &m) {
+    const uint32_t bits = uint32_t(m.scanOn) | uint32_t(m.extScanOn) << 8 |
+                          uint32_t(m.advOn) << 16 | uint32_t(m.extAdvOn) << 24;
+    if (bits == mirrorBits)
+        return;
+    mirrorBits = bits;
     IORegistryEntry::getRegistryRoot()->setProperty("IbtpMirrors", bits, 32);
 }
 
-static IOReturn patched_device_request(void *that, IOService *provider, StandardUSB::DeviceRequest &request, void *data,
-                                       IOMemoryDescriptor *descriptor, unsigned int &length,
-                                       IOUSBHostCompletion *completion, uint32_t timeout);
-
-// Evidence for tests, in the I/O Registry root. Set only on rare events, in thread context.
-static uint32_t extraCommands {}, setAddresses {}, extraFailures {};
-static void noteHook(const char *key, uint32_t value) {
-    IORegistryEntry::getRegistryRoot()->setProperty(key, value, 32);
-}
-// Continuity broadcast witness: the parsing lives in Ibtp so the host test can drive it,
-// this file only publishes the result. Both frames exist solely on the air, so the HCI layer
-// is the one honest place to ask — does the Mac really broadcast the 0x0D Wi-Fi Settings
-// invite, and does the phone answer with 0x0E? Read-only: nothing here alters a byte.
-static uint32_t advDataSets, advReports, tetherSources, lastAdvRssi;
-static uint32_t advDataTypes, advReportAppleTypes, advReportEventTypes;
-static uint32_t publishedAdvAppleTypes, publishedAdvEventTypes;
-static bool inviteCaptured;
-static void noteAdvData(const uint8_t *hci, size_t length) {
-    Ibtp::AdvPayload payload {};
-    if (!Ibtp::advPayload(hci, length, &payload))
+// ---- Continuity witness ----------------------------------------------------------------
+// The parsing lives in Ibtp so the host test can drive it; this file only publishes the result.
+// Both frames exist solely on the air, so the HCI layer is the one honest place to ask: does the Mac
+// really broadcast the 0x0D Wi-Fi Settings invite, and does the phone answer with 0x0E? Read-only,
+// nothing here alters a byte.
+static uint32_t advDataCount, reportCount, hotspotAnswers, lastRssi;
+static uint32_t advTypeMask, reportTypeMask, reportEvtMask;
+static uint32_t shownTypeMask, shownEvtMask;
+static bool inviteSaved;
+static void witnessAdvData(const uint8_t *hci, size_t length) {
+    Ibtp::PayloadRange payload {};
+    if (!Ibtp::payloadRange(hci, length, &payload))
         return;
     uint32_t types = 0;
-    Ibtp::continuityTypes(hci + payload.offset, payload.length, &types);
+    Ibtp::appleTypeIds(hci + payload.offset, payload.length, &types);
     if (!types)
         return;
-    advDataTypes |= types;
-    noteHook("IbtpAdvDataTypes", advDataTypes);
-    noteHook("IbtpAdvDataSets", ++advDataSets);
-    // Keep one real 0x0D frame so the payload can be read back byte for byte.
-    if ((types & 1U << 0x0d) && !inviteCaptured) {
-        inviteCaptured = true;
+    advTypeMask |= types;
+    publishValue("IbtpAdvDataTypes", advTypeMask);
+    publishValue("IbtpAdvDataSets", ++advDataCount);
+    // Keep one real 0x0D frame, so the payload can be read back byte for byte.
+    if ((types & 1U << 0x0d) && !inviteSaved) {
+        inviteSaved = true;
         if (OSData *raw = OSData::withBytes(hci + payload.offset, uint32_t(payload.length))) {
             IORegistryEntry::getRegistryRoot()->setProperty("IbtpInviteFrame", raw);
             raw->release();
         }
     }
 }
-static void noteAdvReport(const uint8_t *event, size_t size) {
-    Ibtp::AdvReportItem items[8] {};
-    const int count = Ibtp::advReportItems(event, size, items, 8);
+static void witnessAdvReport(const uint8_t *event, size_t size) {
+    Ibtp::Report items[8] {};
+    const int count = Ibtp::parseReports(event, size, items, 8);
     if (count <= 0)
         return;
     uint32_t types = 0;
     for (int i = 0; i < count; ++i) {
         types |= items[i].appleTypes;
         if (items[i].eventType < 32)
-            advReportEventTypes |= 1U << items[i].eventType;
+            reportEvtMask |= 1U << items[i].eventType;
     }
-    lastAdvRssi = uint32_t(items[count - 1].rssi);
-    advReportAppleTypes |= types;
-    if (advReportAppleTypes != publishedAdvAppleTypes || advReportEventTypes != publishedAdvEventTypes) {
-        publishedAdvAppleTypes = advReportAppleTypes;
-        publishedAdvEventTypes = advReportEventTypes;
-        noteHook("IbtpAdvReportAppleTypes", advReportAppleTypes);
-        noteHook("IbtpAdvReportEventTypes", advReportEventTypes);
+    lastRssi = uint32_t(items[count - 1].rssi);
+    reportTypeMask |= types;
+    if (reportTypeMask != shownTypeMask || reportEvtMask != shownEvtMask) {
+        shownTypeMask = reportTypeMask;
+        shownEvtMask = reportEvtMask;
+        publishValue("IbtpAdvReportAppleTypes", reportTypeMask);
+        publishValue("IbtpAdvReportEventTypes", reportEvtMask);
     }
     if (types & 1U << 0x0e) {
-        // The phone answered "I have a hotspot". The menu entry, the rapport link and the
-        // silent PSK all hang off this frame ever being seen.
-        noteHook("IbtpTetherSources", ++tetherSources);
-        noteHook("IbtpTetherRssi", lastAdvRssi);
+        // The phone answered "I have a hotspot". The menu entry, the rapport link and the silent PSK
+        // all depend on this frame ever being seen.
+        publishValue("IbtpTetherSources", ++hotspotAnswers);
+        publishValue("IbtpTetherRssi", lastRssi);
         if (OSData *raw = OSData::withBytes(items[count - 1].addr, 6)) {
             IORegistryEntry::getRegistryRoot()->setProperty("IbtpTetherAddr", raw);
             raw->release();
         }
     }
-    if (!(++advReports & 15))
-        noteHook("IbtpAdvReports", advReports);
+    if (!(++reportCount & 15))
+        publishValue("IbtpAdvReports", reportCount);
 }
-// HCI-witness diagnostics: what the create asked for and what the controller answered.
-static uint32_t leOpFingerprint;
-static uint16_t lastLeFailOp;
-static uint8_t lastLeFailStatus;
-static uint32_t leOpFails;
-static uint16_t lastCreateOpcode;
-static uint8_t lastCreateFilterPolicy, lastCreateAddrType, lastCreateAddr[6];
-static uint32_t createCmdCompletes, connCompletes, connOk, createStatusEvents, cancelEvents;
-static uint8_t lastCreateCmdStatus, lastConnStatus;
-static void noteCreateWitness(const uint8_t *hci, size_t length) {
+// What the create asked for and what the controller answered.
+static uint32_t opMask;
+static uint16_t failOp;
+static uint8_t failStatus;
+static uint32_t failCount;
+static uint16_t createOp;
+static uint8_t createPolicy, createAddrType, createPeer[6];
+static uint32_t createCompletes, connEvents, connOk, createStatuses, cancels;
+static uint8_t createStatus, connStatus;
+static void witnessCreate(const uint8_t *hci, size_t length) {
     if (!hci || length < 3)
         return;
-    const uint16_t op = uint16_t(hci[0] | hci[1] << 8);
-    lastCreateOpcode = op;
-    if (op == Ibtp::kOpLeExtCreateConn && length >= 11) {
-        // Params: filter policy(1), address type(1), address(6), ...
-        lastCreateFilterPolicy = hci[3];
-        lastCreateAddrType = hci[4];
-        memcpy(lastCreateAddr, hci + 5, 6);
-    } else if (op == Ibtp::kOpLeCreateConn && length >= 15) {
-        // Params: scan interval(2), scan window(2), filter policy(1), address type(1), address(6).
-        lastCreateFilterPolicy = hci[7];
-        lastCreateAddrType = hci[8];
-        memcpy(lastCreateAddr, hci + 9, 6);
-    } else
+    const uint16_t op = Ibtp::opcodeOf(hci);
+    createOp = op;
+    if (op == Ibtp::OpLeExtCreateConn && length >= 11) {
+        // filter policy, address type, address, ...
+        createPolicy = hci[3];
+        createAddrType = hci[4];
+        memcpy(createPeer, hci + 5, 6);
+    } else if (op == Ibtp::OpLeCreateConn && length >= 15) {
+        // scan interval, scan window, filter policy, address type, address
+        createPolicy = hci[7];
+        createAddrType = hci[8];
+        memcpy(createPeer, hci + 9, 6);
+    } else {
         return;
-    IORegistryEntry::getRegistryRoot()->setProperty("IbtpCreateOpcode", lastCreateOpcode, 16);
-    IORegistryEntry::getRegistryRoot()->setProperty("IbtpCreateFilterPolicy", lastCreateFilterPolicy, 8);
-    IORegistryEntry::getRegistryRoot()->setProperty("IbtpCreateAddrType", lastCreateAddrType, 8);
-    IORegistryEntry::getRegistryRoot()->setProperty("IbtpCreatePeerAddr", lastCreateAddr, 6);
+    }
+    IORegistryEntry::getRegistryRoot()->setProperty("IbtpCreateOpcode", createOp, 16);
+    IORegistryEntry::getRegistryRoot()->setProperty("IbtpCreateFilterPolicy", createPolicy, 8);
+    IORegistryEntry::getRegistryRoot()->setProperty("IbtpCreateAddrType", createAddrType, 8);
+    IORegistryEntry::getRegistryRoot()->setProperty("IbtpCreatePeerAddr", createPeer, 6);
 }
 
-// Intel's vendor ID is also on hubs and other devices. Without the controller's product name, it
-// must at least be a wireless controller (USB class 0xE0).
-static bool isIntelBluetooth(void *that) {
+// Intel's vendor ID also sits on hubs and other devices. Without the controller's product name it
+// has to be a wireless controller at least (USB class 0xE0).
+static bool isOurController(void *that) {
     auto *device = static_cast<IORegistryEntry *>(that);
     auto *vendor = OSDynamicCast(OSNumber, device->getProperty("idVendor"));
     if (!vendor || vendor->unsigned32BitValue() != 0x8087)
@@ -239,7 +243,11 @@ static bool isIntelBluetooth(void *that) {
     return deviceClass && deviceClass->unsigned32BitValue() == 0xE0;
 }
 
-static IOReturn sendExtra(void *that, IOService *provider, const StandardUSB::DeviceRequest &request,
+static IOReturn deviceRequestHook(void *that, IOService *provider, StandardUSB::DeviceRequest &request, void *data,
+                                  IOMemoryDescriptor *descriptor, unsigned int &length,
+                                  IOUSBHostCompletion *completion, uint32_t timeout);
+
+static IOReturn sendAdded(void *that, IOService *provider, const StandardUSB::DeviceRequest &request,
                           const uint8_t *bytes, size_t size, uint32_t timeout) {
     auto *extra = IOBufferMemoryDescriptor::withBytes(bytes, size, kIODirectionOut);
     if (!extra)
@@ -247,27 +255,27 @@ static IOReturn sendExtra(void *that, IOService *provider, const StandardUSB::De
     StandardUSB::DeviceRequest extraRequest = request;
     extraRequest.wLength = uint16_t(size);
     unsigned int extraLength = uint32_t(size);
-    // Synchronous (no completion), so bounded: a stalled controller can't hold the thread forever.
-    const uint32_t extraTimeout = timeout == 0 || timeout > kExtraTimeoutMS ? kExtraTimeoutMS : timeout;
+    // Synchronous, so bounded: a stalled controller must not hold the calling thread forever.
+    const uint32_t extraTimeout = timeout == 0 || timeout > kAddedTimeoutMs ? kAddedTimeoutMs : timeout;
     IOReturn result = extra->prepare(kIODirectionOut);
     if (result == kIOReturnSuccess) {
-        result = FunctionCast(patched_device_request, orig_device_request)(that, provider, extraRequest, nullptr, extra,
-                                                                           extraLength, nullptr, extraTimeout);
+        result = FunctionCast(deviceRequestHook, deviceRequestOrig)(that, provider, extraRequest, nullptr, extra,
+                                                                    extraLength, nullptr, extraTimeout);
         extra->complete(kIODirectionOut);
     }
     extra->release();
     return result;
 }
 
-static IOReturn patched_device_request(void *that, IOService *provider, StandardUSB::DeviceRequest &request, void *data,
-                                       IOMemoryDescriptor *descriptor, unsigned int &length,
-                                       IOUSBHostCompletion *completion, uint32_t timeout) {
+static uint32_t addedCommands {}, addedAddresses {}, addedFailures {};
+static IOReturn deviceRequestHook(void *that, IOService *provider, StandardUSB::DeviceRequest &request, void *data,
+                                  IOMemoryDescriptor *descriptor, unsigned int &length,
+                                  IOUSBHostCompletion *completion, uint32_t timeout) {
     uint8_t hci[32] = {};
     size_t hciLength = 0;
-    // Every USB device comes through here, so only look at the Intel Bluetooth controller.
-    // Class requests to the device carry HCI commands; bRequest isn't reliable for this.
-    // HCI commands are class requests, host to device, addressed to the device (or its interface).
-    if (hciLock && (request.bmRequestType == 0x20 || request.bmRequestType == 0x21) && isIntelBluetooth(that)) {
+    // Every USB device passes through here, so only the Intel Bluetooth controller is of interest.
+    // Class requests to the device carry HCI commands; bRequest says nothing useful about that.
+    if (mirrorLock && (request.bmRequestType == 0x20 || request.bmRequestType == 0x21) && isOurController(that)) {
         if (data) {
             hciLength = min(size_t(request.wLength), sizeof(hci));
             lilu_os_memcpy(hci, data, hciLength);
@@ -277,357 +285,343 @@ static IOReturn patched_device_request(void *that, IOService *provider, Standard
             descriptor->complete(kIODirectionOut);
         }
     }
-    bool legacyScanAddress = false;
+    bool seedLegacyAddress = false;
     unsigned remoteReads = 0;
-    Ibtp::PreCommand pres[4] = {};
+    Ibtp::OutPacket pres[4] = {};
     int preCount = 0;
-    bool resume = false;
-    Ibtp::Action action {};
+    bool restoring = false;
+    Ibtp::FollowUp follow {};
     if (hciLength) {
-        IOLockLock(hciLock);
-        // A different controller than last time starts from nothing.
-        if (hciOwner != that) {
-            hciState = Ibtp::State{};
-            scanResume = Ibtp::ScanResumeState{};
-            hciOwner = that;
-            // A different controller object (re-enumerated, or a second one): the remembered pipe and
-            // any pending duplicates belonged to the old one.
-            interruptPipe = nullptr;
-            if (lengthLock) {
-                IOSimpleLockLock(lengthLock);
-                const uint32_t expired = lengthState.expired, aborts = lengthState.aborts;
-                lengthState = Ibtp::DataLengthState{};
-                lengthState.expired = expired;
-                lengthState.aborts = aborts;
-                IOSimpleLockUnlock(lengthLock);
+        IOLockLock(mirrorLock);
+        // A different controller object than last time starts from nothing.
+        if (mirrorOwner != that) {
+            mirror = Ibtp::Mirror{};
+            park = Ibtp::Park{};
+            mirrorOwner = that;
+            // A re-enumerated or second controller: the remembered pipe and any pending duplicates
+            // belonged to the old one.
+            eventPipe = nullptr;
+            if (featureLock) {
+                IOSimpleLockLock(featureLock);
+                const uint32_t expired = features.expired, aborts = features.aborts;
+                features = Ibtp::FeatureBoard{};
+                features.expired = expired;
+                features.aborts = aborts;
+                IOSimpleLockUnlock(featureLock);
             }
         }
-        const uint16_t op = hciLength >= 3 ? uint16_t(hci[0] | hci[1] << 8) : 0;
-        // LE Read Local Supported Features: the answer is what decides the resolving-list route, and
-        // it comes back on a read that may not be wrapped. Arm the bounded watch before it arrives.
-        if (op == 0x2003) {
-            featureWatchSpanNs = kFeatureRearmNs;
-            featureWatchArmedNs = nowNanoseconds();
-            // The budget only extends: an ask never grants the window unlimited reads.
-            if (__atomic_load_n(&featureWatchReads, __ATOMIC_RELAXED) < 400)
-                __atomic_store_n(&featureWatchReads, 400, __ATOMIC_RELAXED);
-            noteHook("IbtpFeatureAsks", ++featureAsks);
+        const uint16_t op = hciLength >= 3 ? Ibtp::opcodeOf(hci) : 0;
+        // LE Read Local Supported Features: its answer decides the resolving-list route, and it comes
+        // back on a read that may not be wrapped, so arm the bounded watch before it can arrive.
+        if (op == Ibtp::OpLeReadLocalFeatures) {
+            watchSpanNs = kWatchRearmNs;
+            watchArmedNs = monotonicNs();
+            // The budget only ever extends; an ask never grants the window unlimited reads.
+            if (__atomic_load_n(&watchBudget, __ATOMIC_RELAXED) < 400)
+                __atomic_store_n(&watchBudget, 400, __ATOMIC_RELAXED);
+            publishValue("IbtpFeatureAsks", ++featureAsks);
         }
-        // Witness every advertising payload the host publishes, before any decision here can
-        // change a byte. This is the only way to see whether the 0x0D invite frame goes out.
-        noteAdvData(hci, hciLength);
-        // Which mechanism the host uses to reach the phone: address handed straight to the
-        // controller, filter accept list, or resolving list. Read-only, and the only way to tell
-        // them apart without a sniffer — every one of them produces the same create command.
-        if (const uint32_t fp = Ibtp::opFingerprint(op)) {
-            const uint32_t seen = leOpFingerprint;
-            leOpFingerprint |= fp;
-            if (leOpFingerprint != seen)
-                noteHook("IbtpLeOps", leOpFingerprint);
+        // Witness every advertising payload the host publishes, before any decision below can change
+        // a byte. It is the only way to see whether the 0x0D invite frame goes out.
+        witnessAdvData(hci, hciLength);
+        // Which route the host takes to reach the phone. Read-only, and the only way to tell the
+        // three apart without a sniffer - they all produce the same create command.
+        if (const uint32_t fp = Ibtp::fingerprintOf(op)) {
+            const uint32_t seen = opMask;
+            opMask |= fp;
+            if (opMask != seen)
+                publishValue("IbtpLeOps", opMask);
         }
-        if (op == Ibtp::kOpReset) {
-            scanResume = Ibtp::ScanResumeState{};
-            // A controller reset turned every scan/advertising engine off.
-            hciState.scanEnable = hciState.extScanEnable = 0;
-            hciState.legacyAdvEnabled = hciState.extAdvEnabled = false;
+        if (op == Ibtp::OpReset) {
+            park = Ibtp::Park{};
+            // A controller reset turned every scan and advertising engine off.
+            mirror.scanOn = mirror.extScanOn = 0;
+            mirror.advOn = mirror.extAdvOn = false;
         }
-        // A parked create attempt is resumed before anything else — but never in front of
-        // another create, which would undo the park and reinstate the bug.
-        const bool isCreate = op == Ibtp::kOpLeCreateConn || op == Ibtp::kOpLeExtCreateConn;
+        const bool isCreate = op == Ibtp::OpLeCreateConn || op == Ibtp::OpLeExtCreateConn;
         if (isCreate) {
-            noteHook("IbtpLeCreates", ++leCreates);
-            noteCreateWitness(hci, hciLength);
-        }
-        if (isCreate) {
-            // Park scanning and advertising for the create; the helper records what it
-            // switched off so the attempt-ending event can restore exactly that.
-            preCount = Ibtp::wantsPreScanOff(hciState, scanResume, hci, hciLength, pres, parkScanning);
-            noteHook("IbtpLastParkCommands", uint32_t(preCount));
-            observeMirrors(hciState);
+            publishValue("IbtpLeCreates", ++createsSeen);
+            witnessCreate(hci, hciLength);
+            // Park scanning and advertising for the create; the helper remembers what it switched off
+            // so the attempt-ending event can put back exactly that.
+            preCount = Ibtp::parkBeforeCreate(mirror, park, hci, hciLength, pres, parkOn);
+            publishValue("IbtpLastParkCommands", uint32_t(preCount));
+            publishMirrors(mirror);
         } else {
-            // Capture what was parked before wantsScanResume clears the flags; the mirror must
-            // follow what the radio actually runs again, or the next create finds mirrors of 0
-            // and never parks — the desync that let the bug through every resume.
-            const bool parkedLegacyScan = scanResume.parkedLegacyScan, parkedExtScan = scanResume.parkedExtScan,
-                       parkedLegacyAdv = scanResume.parkedLegacyAdv, parkedExtAdv = scanResume.parkedExtAdv;
-            if ((preCount = Ibtp::wantsScanResume(scanResume, pres)) > 0) {
-                resume = true;
-                if (scanResume.watchdogFired)
-                    noteHook("IbtpResumeWatchdog", ++watchdogResumes);
-                // Bring our mirrors in line with what the resume just re-enabled.
-                if (parkedLegacyScan)
-                    hciState.scanEnable = scanResume.enable;
-                if (parkedExtScan)
-                    hciState.extScanEnable = scanResume.extEnable;
-                if (parkedLegacyAdv)
-                    hciState.legacyAdvEnabled = true;
-                if (parkedExtAdv)
-                    hciState.extAdvEnabled = true;
+            // Capture what was parked before the restore clears the flags: the mirror has to follow
+            // what the radio really runs again, or the next create finds zeros and never parks - the
+            // desync that let the bug through on every resume.
+            const bool tookScan = park.tookScan, tookExtScan = park.tookExtScan,
+                       tookAdv = park.tookAdv, tookExtAdv = park.tookExtAdv;
+            if ((preCount = Ibtp::restoreAfterCreate(park, pres)) > 0) {
+                restoring = true;
+                if (park.forcedByWatchdog)
+                    publishValue("IbtpResumeWatchdog", ++watchdogLifts);
+                if (tookScan)
+                    mirror.scanOn = park.scanOn;
+                if (tookExtScan)
+                    mirror.extScanOn = park.extScanOn;
+                if (tookAdv)
+                    mirror.advOn = true;
+                if (tookExtAdv)
+                    mirror.extAdvOn = true;
             } else {
-                // This helper is also the only place the host's scan/advertising enable commands
-                // are mirrored. Skipping it for ordinary commands left every mirror at 0, so no
-                // create ever parked — the regression that made 2.7.7 a no-op.
-                preCount = Ibtp::wantsPreScanOff(hciState, scanResume, hci, hciLength, pres, parkScanning);
-                if (preCount > 0) {  // a non-create op should never park; count it if one does
-                    noteHook("IbtpUnexpectedParks", ++unexpectedParks);
-                }
-                observeMirrors(hciState);
+                // The same helper is the only place the host's scan/advertising enables are mirrored.
+                // Skipping it for ordinary commands left every mirror at zero, so no create ever
+                // parked - the regression that made 2.7.7 a no-op.
+                preCount = Ibtp::parkBeforeCreate(mirror, park, hci, hciLength, pres, parkOn);
+                if (preCount > 0)   // a non-create op should never park; count it if one does
+                    publishValue("IbtpUnexpectedParks", ++strayParks);
             }
+            publishMirrors(mirror);
         }
-        legacyScanAddress = Ibtp::wantsLegacyScanAddress(hciState, hci, hciLength);
-        action = Ibtp::onCommand(hciState, hci, hciLength, patchScanning);
-        IOLockUnlock(hciLock);
-        if (lengthLock) {
-            const uint64_t now = nowNanoseconds();
-            IOSimpleLockLock(lengthLock);
-            remoteReads = Ibtp::extraRemoteReads(lengthState, hci, hciLength, now);
-            IOSimpleLockUnlock(lengthLock);
+        seedLegacyAddress = Ibtp::shouldSeedLegacyAddress(mirror, hci, hciLength);
+        follow = Ibtp::mirrorCommand(mirror, hci, hciLength, scanPatchOn);
+        IOLockUnlock(mirrorLock);
+        if (featureLock) {
+            const uint64_t now = monotonicNs();
+            IOSimpleLockLock(featureLock);
+            remoteReads = Ibtp::duplicateReads(features, hci, hciLength, now);
+            IOSimpleLockUnlock(featureLock);
         }
-        if (widenScan) {
+        if (widenOn) {
             uint32_t observed = 0;
-            if (Ibtp::widenCreateScan(hci, hciLength, &observed)) {
-                noteHook("IbtpCreateScanParams", observed);
+            if (Ibtp::widenInitiatorScan(hci, hciLength, &observed)) {
+                publishValue("IbtpCreateScanParams", observed);
                 // The command leaves from the caller's buffer and hci is only our shadow, so the
-                // widened window has to be written back or the controller never sees it. Only
-                // the plain data pointer is touched: writeBytes on the USB IOMemoryDescriptor
-                // panics with "IOGMD: not wired for the IODMACommand" because the descriptor is
-                // not wired for CPU access — that write-back is exactly what 2.7.10 crashed on.
+                // widened window has to be written back or the controller never sees it. Only the
+                // plain data pointer is touched: writeBytes on the USB IOMemoryDescriptor panics
+                // with "IOGMD: not wired for the IODMACommand", which is exactly what 2.7.10
+                // crashed on.
                 if (data) {
                     lilu_os_memcpy(data, hci, hciLength);
-                    noteHook("IbtpWidened", ++widenedCreates);
+                    publishValue("IbtpWidened", ++widened);
                 } else {
-                    // Descriptor-only request: there is no safe way to rewrite it, so the host's
-                    // own duty cycle stays. Counted so the telemetry says whether this path is
-                    // the common one before touching anything else.
-                    noteHook("IbtpWidenSkipped", ++widenSkipped);
+                    // Descriptor-only request: no safe way to rewrite it, so the host's own duty
+                    // cycle stays. Counted, so the telemetry shows whether this is the common path.
+                    publishValue("IbtpWidenSkipped", ++widenMissed);
                 }
             }
         }
     }
     for (int i = 0; i < preCount; ++i) {
-        if (sendExtra(that, provider, request, pres[i].data, pres[i].length, timeout) == kIOReturnSuccess) {
-            if (resume)
-                noteHook("IbtpScanResumes", ++scanResumes);
+        if (sendAdded(that, provider, request, pres[i].bytes, pres[i].len, timeout) == kIOReturnSuccess) {
+            if (restoring)
+                publishValue("IbtpScanResumes", ++parksLifted);
             else
-                noteHook("IbtpScanSuspends", ++scanSuspends);
+                publishValue("IbtpScanSuspends", ++parksMade);
         } else {
-            noteHook("IbtpScanResumeFails", ++scanResumeFails);
+            publishValue("IbtpScanResumeFails", ++parkSendFails);
         }
     }
     for (unsigned i = 0; i < remoteReads; ++i) {
-        // Sent before the real command, as IntelBTPatcher does: the three completions carry the
-        // same features, so the first one reaches bluetoothd unchanged and the other two are
-        // rewritten into the events it's missing.
-        if (sendExtra(that, provider, request, hci, hciLength, timeout) != kIOReturnSuccess) {
-            if (lengthLock) {
-                IOSimpleLockLock(lengthLock);
-                Ibtp::forgetRemoteRead(lengthState, hci, hciLength);
-                IOSimpleLockUnlock(lengthLock);
+        // Sent before the real command, as IntelBTPatcher does: all three completions carry the same
+        // features, so the first reaches bluetoothd untouched and the other two are rewritten into
+        // the events it is missing.
+        if (sendAdded(that, provider, request, hci, hciLength, timeout) != kIOReturnSuccess) {
+            if (featureLock) {
+                IOSimpleLockLock(featureLock);
+                Ibtp::dropDuplicate(features, hci, hciLength);
+                IOSimpleLockUnlock(featureLock);
             }
-            noteHook("IbtpLengthFailures", bumpCounter(lengthFailures));
+            publishValue("IbtpLengthFailures", bump(forgeWriteFails));
         }
     }
-    if (legacyScanAddress) {
+    if (seedLegacyAddress) {
         // IntelBTPatcher's workaround, sent before the scan command like the original.
-        uint8_t fixed[9] = {0x05, 0x20, 0x06};
-        lilu_os_memcpy(fixed + 3, Ibtp::kFixedPatcherAddress, 6);
-        sendExtra(that, provider, request, fixed, sizeof(fixed), timeout);
+        uint8_t seed[9] = {0x05, 0x20, 0x06};
+        lilu_os_memcpy(seed + 3, Ibtp::kLegacySeedAddress, 6);
+        sendAdded(that, provider, request, seed, sizeof(seed), timeout);
     }
     static bool sawCommand {};
     if (hciLength >= 3 && !sawCommand) {
         sawCommand = true;
-        noteHook("IbtpFirstRequest", request.bRequest);
+        publishValue("IbtpFirstRequest", request.bRequest);
     }
-    const IOReturn result = FunctionCast(patched_device_request, orig_device_request)(that, provider, request, data, descriptor, length, completion, timeout);
-    if (action.sendSetAddress || action.sendEventMask) {
-        // Only after the command it depends on was accepted. A set address that didn't go out is
+    const IOReturn result = FunctionCast(deviceRequestHook, deviceRequestOrig)(that, provider, request, data, descriptor,
+                                                                              length, completion, timeout);
+    if (follow.setAddress || follow.eventMask) {
+        // Only after the command it depends on was accepted. A set address that did not go out is
         // forgotten, so the next parameters command for that set tries again.
         const IOReturn extra = result == kIOReturnSuccess ?
-            sendExtra(that, provider, request, action.output, action.outputLength, timeout) : result;
-        if (action.sendSetAddress && extra != kIOReturnSuccess) {
-            IOLockLock(hciLock);
-            if (hciOwner == that)
-                hciState.addressedSets &= ~(1U << action.output[3]);
-            IOLockUnlock(hciLock);
+            sendAdded(that, provider, request, follow.bytes, follow.len, timeout) : result;
+        if (follow.setAddress && extra != kIOReturnSuccess) {
+            IOLockLock(mirrorLock);
+            if (mirrorOwner == that)
+                mirror.addressed &= ~(1U << follow.bytes[3]);
+            IOLockUnlock(mirrorLock);
         }
         if (extra == kIOReturnSuccess) {
-            noteHook("IbtpExtraCommands", ++extraCommands);
-            if (action.sendSetAddress)
-                noteHook("IbtpSetAddresses", ++setAddresses);
+            publishValue("IbtpExtraCommands", ++addedCommands);
+            if (follow.setAddress)
+                publishValue("IbtpSetAddresses", ++addedAddresses);
         } else {
-            noteHook("IbtpExtraFailures", ++extraFailures);
+            publishValue("IbtpExtraFailures", ++addedFailures);
         }
     }
     return result;
 }
 
-// The controller's events arrive on its interrupt IN pipe, and only the pipe object can be used
-// to wrap them, so it's remembered when it's created. Anything else on the bus is left alone.
-static void captureInterruptPipe(void *that, StandardUSB::EndpointDescriptor const *descriptor, IOUSBHostDevice *device) {
-    if (!descriptor || !device || !isIntelBluetooth(device))
+// The controller's events arrive on its interrupt IN pipe and only the pipe object can wrap them, so
+// it is remembered when created. Anything else on the bus is left alone.
+static void rememberEventPipe(void *that, StandardUSB::EndpointDescriptor const *descriptor, IOUSBHostDevice *device) {
+    if (!descriptor || !device || !isOurController(device))
         return;
-    // The endpoint is picked apart by hand: StandardUSB::getEndpointType/getEndpointDirection are
-    // exports of IOUSBHostFamily, and OpenCore's prelinker resolves them to 0 (RIP-relative
-    // overflow), which makes injection fail. The descriptor is the 7-byte USB layout:
-    // bEndpointAddress (offset 2, bit 7 = direction in), bmAttributes (offset 3, bits 0-1 = type).
+    // The endpoint is read by hand: StandardUSB::getEndpointType/getEndpointDirection are exports of
+    // IOUSBHostFamily that OpenCore's prelinker resolves to 0 (RIP-relative overflow), which makes
+    // injection fail. The descriptor is the 7-byte USB layout: bEndpointAddress at offset 2 (bit 7 =
+    // direction in), bmAttributes at offset 3 (bits 0-1 = type).
     auto *bytes = reinterpret_cast<const uint8_t *>(descriptor);
     if (bytes[2] & 0x80 && (bytes[3] & 0x03) == 0x03)
-        interruptPipe = that;
+        eventPipe = that;
 }
 
 // The pipe is created through one of two overloads, depending on the macOS version.
-static int patched_init_pipe(void *that, StandardUSB::EndpointDescriptor const *descriptor,
-                             StandardUSB::SuperSpeedEndpointCompanionDescriptor const *companion, void *controller,
-                             IOUSBHostDevice *device, void *interface, unsigned char a7, unsigned short a8) {
-    const int result = FunctionCast(patched_init_pipe, orig_init_pipe)(that, descriptor, companion, controller, device,
-                                                                       interface, a7, a8);
-    captureInterruptPipe(that, descriptor, device);
+static int initPipeHook(void *that, StandardUSB::EndpointDescriptor const *descriptor,
+                        StandardUSB::SuperSpeedEndpointCompanionDescriptor const *companion, void *controller,
+                        IOUSBHostDevice *device, void *interface, unsigned char a7, unsigned short a8) {
+    const int result = FunctionCast(initPipeHook, initPipeOrig)(that, descriptor, companion, controller, device,
+                                                                interface, a7, a8);
+    rememberEventPipe(that, descriptor, device);
     return result;
 }
 
-static int patched_init_pipe_config(void *that, StandardUSB::EndpointDescriptor const *descriptor,
-                                    StandardUSB::ConfigurationDescriptor const *config, void *controller,
-                                    IOUSBHostDevice *device, void *interface, unsigned char a7, unsigned short a8) {
-    const int result = FunctionCast(patched_init_pipe_config, orig_init_pipe_config)(that, descriptor, config, controller,
-                                                                                     device, interface, a7, a8);
-    captureInterruptPipe(that, descriptor, device);
+static int initPipeConfigHook(void *that, StandardUSB::EndpointDescriptor const *descriptor,
+                              StandardUSB::ConfigurationDescriptor const *config, void *controller,
+                              IOUSBHostDevice *device, void *interface, unsigned char a7, unsigned short a8) {
+    const int result = FunctionCast(initPipeConfigHook, initPipeConfigOrig)(that, descriptor, config, controller,
+                                                                           device, interface, a7, a8);
+    rememberEventPipe(that, descriptor, device);
     return result;
 }
 
 // A completion owns the caller's closure, so the original one is kept here while ours runs.
-struct DelayedCompletion {
+struct WrappedRead {
     IOUSBHostCompletion original;
     IOMemoryDescriptor *buffer;
-    IOUSBHostCompletion wrapped;    // what the USB stack is given, so the caller's own is never edited
+    IOUSBHostCompletion wrapped;    // handed to the USB stack, so the caller's own is never edited
 };
 
-// Publishes a counter that changed, outside the spinlock (a registry write allocates).
-static void noteChanged(const char *key, uint32_t value, uint32_t &seen) {
-    if (value != __atomic_load_n(&seen, __ATOMIC_RELAXED)) {
-        __atomic_store_n(&seen, value, __ATOMIC_RELAXED);
-        noteHook(key, value);
-    }
-}
-
-static void rewriteCompletion(void *owner, void *parameter, IOReturn status, uint32_t bytesTransferred) {
-    auto *delayed = static_cast<DelayedCompletion *>(owner);
+static void readCompletion(void *owner, void *parameter, IOReturn status, uint32_t bytesTransferred) {
+    auto *delayed = static_cast<WrappedRead *>(owner);
     IOMemoryDescriptor *buffer = delayed->buffer;
-    // readBytes() and writeBytes() need the descriptor wired, and only a hold this call took is known
-    // to be there: touching a buffer this call couldn't prepare panics with "IOGMD: not wired for the
+    // readBytes()/writeBytes() need the descriptor wired, and only a hold taken here is known to be
+    // there: touching a buffer this call could not prepare panics with "IOGMD: not wired for the
     // IODMACommand". 0.9.1 assumed a refused prepare() meant "already prepared on Tahoe" and read
-    // anyway, which was never tested; upstream's Tahoe run shows prepare() succeeds. A hold taken here
-    // is also the only one released here.
+    // anyway; upstream's Tahoe run shows prepare() succeeds. A hold taken here is also the only one
+    // released here.
     const bool held = status == kIOReturnSuccess && buffer &&
-        buffer->getLength() >= Ibtp::kDataLengthEventLength &&
+        buffer->getLength() >= Ibtp::kDataLengthLen &&
         buffer->prepare(kIODirectionInOut) == kIOReturnSuccess;
     bool abort = !held;
-    // Set when a 0x2003 answer was rewritten in place at the same size: the shared write-back
-    // below only fires on size changes, so a same-size edit needs its own.
-    bool featureModified = false;
+    // Set when a feature-word answer was rewritten in place at the same size; the shared write-back
+    // below only fires on a size change, so a same-size edit needs its own.
+    bool featureEdited = false;
     if (held) {
-        // Events shorter than 6 bytes can't be one of the rewritten ones; they pass through untouched.
+        // Anything shorter than 6 bytes cannot be one of the rewritten events.
         if (bytesTransferred >= 6) {
             uint8_t event[32] = {};
             const size_t size = min(min(size_t(bytesTransferred), sizeof(event)), size_t(buffer->getLength()));
             buffer->readBytes(0, event, size);
-            // A connection attempt that just ended releases the scanning parked for it; the next
-            // outgoing command carries the restore.
-            Ibtp::onScanResumeEvent(scanResume, event, size);
-            // HCI witness, unconditional: the controller's verdict on the last create, whether or not
-            // a park is open. Gating it on the park meant a silent no-park run left no evidence at all
-            // (2.7.7 went in blind that way).
-            if (event[0] == 0x3e && size >= 5 && event[2] == 0x02) {
-                // Advertising reports are pure observation: what the phone is saying, and whether
-                // what it says is connectable, decides if any create can land.
-                noteAdvReport(event, size);
-            } else if (event[0] == 0x0e && size >= 8 &&
-                uint16_t(event[3] | event[4] << 8) == lastCreateOpcode) {
-                lastCreateCmdStatus = event[5];
-                noteHook("IbtpCreateCmdStatus", lastCreateCmdStatus);
-                noteHook("IbtpCreateCmdCompletes", ++createCmdCompletes);
-            } else if (event[0] == 0x0f && size >= 6 &&
-                       uint16_t(event[4] | event[5] << 8) == lastCreateOpcode) {
-                // Command Status: the controller's verdict when it rejects the create outright.
-                noteHook("IbtpCreateStatus", event[2]);
-                noteHook("IbtpCreateStatusEvents", ++createStatusEvents);
-            } else if (event[0] == 0x0e && size >= 11 &&
-                       uint16_t(event[3] | event[4] << 8) == 0x2003) {
-                // LE Read Local Supported Features: the controller's own word. Published raw —
-                // whether bit 6 (LL Privacy) is honest decides the whole resolving-list route.
-                lastLEFeatures = 0;
+            // A connection attempt that just ended releases what was parked for it; the next outgoing
+            // command carries the restore.
+            Ibtp::observeEndingEvent(park, event, size);
+            // Unconditional HCI witness: the controller's verdict on the last create, park or no
+            // park. Gating it on the park meant a silent no-park run left no evidence at all (2.7.7
+            // went in blind that way).
+            if (event[0] == Ibtp::kEvtLeMeta && size >= 5 && event[2] == Ibtp::kSubAdvReport) {
+                // Advertising reports are pure observation: what the phone says - and whether what it
+                // says is connectable - decides whether any create can land.
+                witnessAdvReport(event, size);
+            } else if (event[0] == Ibtp::kEvtCmdComplete && size >= 8 &&
+                       uint16_t(event[3] | event[4] << 8) == createOp) {
+                createStatus = event[5];
+                publishValue("IbtpCreateCmdStatus", createStatus);
+                publishValue("IbtpCreateCmdCompletes", ++createCompletes);
+            } else if (event[0] == Ibtp::kEvtCmdStatus && size >= 6 &&
+                       uint16_t(event[4] | event[5] << 8) == createOp) {
+                // The controller's verdict when it rejects the create outright.
+                publishValue("IbtpCreateStatus", event[2]);
+                publishValue("IbtpCreateStatusEvents", ++createStatuses);
+            } else if (event[0] == Ibtp::kEvtCmdComplete && size >= 11 &&
+                       uint16_t(event[3] | event[4] << 8) == Ibtp::OpLeReadLocalFeatures) {
+                // The controller's own feature word, published raw: whether bit 6 (LL Privacy) is
+                // honest decides the whole resolving-list route.
+                featureWord = 0;
                 for (int i = 0; i < 8; ++i)
-                    lastLEFeatures |= uint64_t(event[5 + i]) << (8 * i);
-                IORegistryEntry::getRegistryRoot()->setProperty("IbtpLEFeatures", lastLEFeatures, 64);
-                noteHook("IbtpLEFeatureReads", ++leFeatureReads);
-                if (privacyFix && !event[2] && !(event[5] & 0x40)) {
+                    featureWord |= uint64_t(event[5 + i]) << (8 * i);
+                IORegistryEntry::getRegistryRoot()->setProperty("IbtpLEFeatures", featureWord, 64);
+                publishValue("IbtpLEFeatureReads", ++featureReads);
+                if (privacyOn && !event[2] && !(event[5] & 0x40)) {
                     event[5] |= 0x40;
-                    featureModified = true;
-                    noteHook("IbtpPrivacyRewrites", bumpCounter(privacyRewrites));
+                    featureEdited = true;
+                    publishValue("IbtpPrivacyRewrites", bump(privacyPatched));
                 }
-            } else if ((event[0] == 0x0e || event[0] == 0x0f) && size >= 6) {
-                const uint16_t witnessOp = event[0] == 0x0f
+            } else if ((event[0] == Ibtp::kEvtCmdComplete || event[0] == Ibtp::kEvtCmdStatus) && size >= 6) {
+                const uint16_t witnessOp = event[0] == Ibtp::kEvtCmdStatus
                     ? uint16_t(event[4] | event[5] << 8)
                     : uint16_t(event[3] | event[4] << 8);
-                if (witnessOp == Ibtp::kOpLeCreateConnCancel)
-                    noteHook("IbtpCancelEvents", ++cancelEvents);
+                if (witnessOp == Ibtp::OpLeCreateConnCancel)
+                    publishValue("IbtpCancelEvents", ++cancels);
                 // An LE command the controller rejects is a dead end bluetoothd may never retry, and
                 // the rejection never reaches user space. Keeping the first one on record separates
                 // "the link was never possible" from "the link was attempted and timed out".
-                const uint8_t witnessStatus = event[0] == 0x0f ? event[2] : event[5];
+                const uint8_t witnessStatus = event[0] == Ibtp::kEvtCmdStatus ? event[2] : event[5];
                 if (witnessStatus && (witnessOp & 0xfc00) == 0x2000) {
-                    lastLeFailOp = witnessOp;
-                    lastLeFailStatus = witnessStatus;
-                    IORegistryEntry::getRegistryRoot()->setProperty("IbtpLeFailOp", lastLeFailOp, 16);
-                    noteHook("IbtpLeFailStatus", lastLeFailStatus);
-                    noteHook("IbtpLeFails", ++leOpFails);
+                    failOp = witnessOp;
+                    failStatus = witnessStatus;
+                    IORegistryEntry::getRegistryRoot()->setProperty("IbtpLeFailOp", failOp, 16);
+                    publishValue("IbtpLeFailStatus", failStatus);
+                    publishValue("IbtpLeFails", ++failCount);
                 }
-            } else if (event[0] == 0x3e && size >= 4 &&
-                       (event[2] == 0x01 || event[2] == 0x0a || event[2] == 0x0b)) {
-                lastConnStatus = event[3];
-                noteHook("IbtpConnStatus", lastConnStatus);
-                noteHook("IbtpConnCompletes", ++connCompletes);
-                if (!lastConnStatus)
-                    noteHook("IbtpConnOk", ++connOk);
+            } else if (event[0] == Ibtp::kEvtLeMeta && size >= 4 &&
+                       (event[2] == Ibtp::kSubConnComplete || event[2] == Ibtp::kSubConnCompleteEnhanced ||
+                        event[2] == Ibtp::kSubConnCompleteEnhancedV2)) {
+                connStatus = event[3];
+                publishValue("IbtpConnStatus", connStatus);
+                publishValue("IbtpConnCompletes", ++connEvents);
+                if (!connStatus)
+                    publishValue("IbtpConnOk", ++connOk);
             }
-            // A parked round can wrap reads without a data-length round being armed, so the table and
-            // its lock are not guaranteed to exist here; without the lock nothing is tracked at all.
+            // A parked round can wrap reads with no data-length round armed, so the board and its
+            // lock are not guaranteed here; without the lock nothing is tracked at all.
             size_t rewritten = size;
-            if (lengthLock) {
-                IOSimpleLockLock(lengthLock);
-                rewritten = Ibtp::rewriteEvent(lengthState, event, size);
-                IOSimpleLockUnlock(lengthLock);
+            if (featureLock) {
+                IOSimpleLockLock(featureLock);
+                rewritten = Ibtp::forgeEvent(features, event, size);
+                IOSimpleLockUnlock(featureLock);
             }
-            // writeBytes returns the number of bytes written, not an IOReturn. The shrunk size may
+            // writeBytes returns the number of bytes written, not an IOReturn. The shorter size may
             // only be claimed when every rewritten byte is really in the buffer: forwarding the
-            // original size leaves stale feature bytes behind, which the stack parses as garbage
-            // events and bluetoothd takes the parser desync as fatal (reason 607).
-            if (featureModified && rewritten == size) {
+            // original size leaves stale feature bytes behind, the stack parses them as garbage
+            // events and bluetoothd treats the parser desync as fatal (reason 607).
+            if (featureEdited && rewritten == size) {
                 if (buffer->writeBytes(0, event, rewritten) == rewritten) {
                     bytesTransferred = uint32_t(rewritten);
                 } else {
-                    noteHook("IbtpFeatureWriteFails", bumpCounter(featureWriteFails));
+                    publishValue("IbtpFeatureWriteFails", bump(featureWriteFails));
                     abort = true;
                 }
             } else if (rewritten != size) {
                 if (buffer->writeBytes(0, event, rewritten) == rewritten) {
                     bytesTransferred = uint32_t(rewritten);
-                    noteHook("IbtpLengthRewrites", bumpCounter(lengthRewrites));
+                    publishValue("IbtpLengthRewrites", bump(forgeWrites));
                 } else {
-                    noteHook("IbtpLengthFailures", bumpCounter(lengthFailures));
-                    abort = true;   // a duplicate that can't be rewritten can't be waited for either
+                    publishValue("IbtpLengthFailures", bump(forgeWriteFails));
+                    abort = true;   // a duplicate that cannot be rewritten cannot be waited for either
                 }
             }
         }
         buffer->complete(kIODirectionInOut);
     }
-    if (abort && lengthLock) {
+    if (abort && featureLock) {
         // Nothing could be rewritten into this read (failed transfer, no hold of our own, short
         // write): drop the pending round so no further read is wrapped for it.
-        IOSimpleLockLock(lengthLock);
-        Ibtp::abortLinks(lengthState);
-        const uint32_t aborts = lengthState.aborts;
-        IOSimpleLockUnlock(lengthLock);
-        noteChanged("IbtpLengthAborts", aborts, lengthAbortsSeen);
+        IOSimpleLockLock(featureLock);
+        Ibtp::dropRound(features);
+        const uint32_t aborts = features.aborts;
+        IOSimpleLockUnlock(featureLock);
+        publishIfChanged("IbtpLengthAborts", aborts, abortsSeen);
     }
     const IOUSBHostCompletion original = delayed->original;
     IOFree(delayed, sizeof(*delayed));
@@ -635,70 +629,71 @@ static void rewriteCompletion(void *owner, void *parameter, IOReturn status, uin
         original.action(original.owner, parameter, status, bytesTransferred);
 }
 
-// The park needs to see the event that ends it, but 0.9.1 wrapped every read for as long as the park
-// stayed open — the same unbounded hijack of the event pipe in another coat. So it gets its own
-// budget: a read count and a wall-clock window. If it runs out, the stall guard in wantsScanResume
-// restores scanning on the next host command, exactly as it already would have.
-enum : uint32_t { kMaxParkWraps = 256 };
-enum : uint64_t { kParkWrapBudgetNs = 1000000000ULL };
+// The park has to see the event that ends it, but 0.9.1 wrapped every read for as long as the park
+// stayed open - the same unbounded hijack of the event pipe in another coat. So it gets its own
+// budget: a read count and a wall-clock window. If either runs out, the stall guard in
+// restoreAfterCreate puts scanning back on the next host command, exactly as it would have anyway.
+enum : uint32_t { kParkWrapBudget = 256 };
+enum : uint64_t { kParkWrapWindowNs = 1000000000ULL };
 static uint32_t parkWraps {};
 static uint64_t parkArmedNs {};
 
-static IOReturn patched_pipe_io(void *that, IOMemoryDescriptor *dataBuffer, uint32_t bytesTransferred,
-                                IOUSBHostCompletion *completion, uint32_t completionTimeoutMs) {
+static IOReturn pipeIoHook(void *that, IOMemoryDescriptor *dataBuffer, uint32_t bytesTransferred,
+                           IOUSBHostCompletion *completion, uint32_t completionTimeoutMs) {
     bool wrap = false, parkWrap = false;
-    const bool knownPipe = that == interruptPipe;
-    const uint64_t now = nowNanoseconds();
-    const uint32_t watchLeft = __atomic_load_n(&featureWatchReads, __ATOMIC_RELAXED);
-    const bool watchLive = watchLeft != 0 && featureWatchArmedNs != 0 && now - featureWatchArmedNs < featureWatchSpanNs;
+    const bool knownPipe = that == eventPipe;
+    const uint64_t now = monotonicNs();
+    const uint32_t watchLeft = __atomic_load_n(&watchBudget, __ATOMIC_RELAXED);
+    const bool watchLive = watchLeft != 0 && watchArmedNs != 0 && now - watchArmedNs < watchSpanNs;
     if (completion && dataBuffer && (knownPipe || watchLive)) {
         if (knownPipe) {
-            if (!scanResume.suspended) {
+            if (!park.parked) {
                 parkWraps = 0;
                 parkArmedNs = now;
             }
-            if (lengthLock) {
-                IOSimpleLockLock(lengthLock);
-                wrap = Ibtp::wrapRead(lengthState, now, dataBuffer->getLength());
-                const uint32_t expired = lengthState.expired, aborts = lengthState.aborts;
-                IOSimpleLockUnlock(lengthLock);
-                // Their own counters: IbtpLengthFailures counts copies that couldn't be sent or written back.
-                noteChanged("IbtpLengthExpired", expired, lengthExpiredSeen);
-                noteChanged("IbtpLengthAborts", aborts, lengthAbortsSeen);
+            if (featureLock) {
+                IOSimpleLockLock(featureLock);
+                wrap = Ibtp::takeWrap(features, now, dataBuffer->getLength());
+                const uint32_t expired = features.expired, aborts = features.aborts;
+                IOSimpleLockUnlock(featureLock);
+                // Counters of their own: IbtpLengthFailures counts copies that could not be sent or
+                // written back.
+                publishIfChanged("IbtpLengthExpired", expired, expiredSeen);
+                publishIfChanged("IbtpLengthAborts", aborts, abortsSeen);
             }
-            if (!wrap && scanResume.suspended && parkWraps < kMaxParkWraps && now - parkArmedNs < kParkWrapBudgetNs &&
-                dataBuffer->getLength() >= Ibtp::kDataLengthEventLength) {
+            if (!wrap && park.parked && parkWraps < kParkWrapBudget && now - parkArmedNs < kParkWrapWindowNs &&
+                dataBuffer->getLength() >= Ibtp::kDataLengthLen) {
                 ++parkWraps;
                 parkWrap = true;
             }
         }
-        if (!wrap && !parkWrap && watchLive && dataBuffer->getLength() >= Ibtp::kDataLengthEventLength) {
+        if (!wrap && !parkWrap && watchLive && dataBuffer->getLength() >= Ibtp::kDataLengthLen) {
             uint32_t left = watchLeft;
             while (left) {
-                if (__atomic_compare_exchange_n(&featureWatchReads, &left, left - 1, false,
+                if (__atomic_compare_exchange_n(&watchBudget, &left, left - 1, false,
                                                 __ATOMIC_RELAXED, __ATOMIC_RELAXED)) {
                     wrap = true;
                     // Published once: this fires for every read the window takes over.
-                    if (!featureWraps++)
-                        noteHook("IbtpFeatureWraps", 1);
+                    if (!watchWraps++)
+                        publishValue("IbtpFeatureWraps", 1);
                     break;
                 }
             }
         }
     }
     if (wrap || parkWrap) {
-        auto *delayed = static_cast<DelayedCompletion *>(IOMalloc(sizeof(DelayedCompletion)));
+        auto *delayed = static_cast<WrappedRead *>(IOMalloc(sizeof(WrappedRead)));
         if (delayed) {
-            // The caller's completion is never modified: ours is a copy held in the same allocation, so
-            // a caller that reuses its structure can't send a read pointing at a freed wrapper, and a
+            // The caller's completion is never modified: ours is a copy in the same allocation, so a
+            // caller that reuses its structure cannot send a read pointing at a freed wrapper, and a
             // failed submit leaves the caller's structure as it was.
             delayed->original = *completion;
             delayed->buffer = dataBuffer;
             delayed->wrapped = *completion;
-            delayed->wrapped.action = rewriteCompletion;
+            delayed->wrapped.action = readCompletion;
             delayed->wrapped.owner = delayed;
-            const IOReturn result = FunctionCast(patched_pipe_io, orig_pipe_io)(that, dataBuffer, bytesTransferred,
-                                                                               &delayed->wrapped, completionTimeoutMs);
+            const IOReturn result = FunctionCast(pipeIoHook, pipeIoOrig)(that, dataBuffer, bytesTransferred,
+                                                                        &delayed->wrapped, completionTimeoutMs);
             // A refused submit never calls the completion, so nothing else would free this:
             // IOUSBHostPipe::io returns kIOReturnSuccess only if the completion will be called.
             if (result != kIOReturnSuccess)
@@ -706,7 +701,7 @@ static IOReturn patched_pipe_io(void *that, IOMemoryDescriptor *dataBuffer, uint
             return result;
         }
     }
-    return FunctionCast(patched_pipe_io, orig_pipe_io)(that, dataBuffer, bytesTransferred, completion, completionTimeoutMs);
+    return FunctionCast(pipeIoHook, pipeIoOrig)(that, dataBuffer, bytesTransferred, completion, completionTimeoutMs);
 }
 
 static const char *usbHostPaths[] {"/System/Library/Extensions/IOUSBHostFamily.kext/Contents/MacOS/IOUSBHostFamily"};
@@ -736,81 +731,81 @@ PluginConfiguration ADDPR(config) {
     KernelVersion::Tahoe,
 #endif
     []() {
-        // On by default. Lilu disables the whole plugin when -ibtpoff is present
-        // (bootargOff above); patchScanning is the only remaining user switch.
-        patchScanning = !checkKernelArgument("-btlenoscan");
-        parkScanning = checkKernelArgument("-ibtppark");
-        widenScan = checkKernelArgument("-ibtpwiden");
-        privacyFix = checkKernelArgument("-ibtpprivacy");
-        noteHook("IbtpParkEnabled", parkScanning ? 1 : 0);
-        noteHook("IbtpWidenEnabled", widenScan ? 1 : 0);
-        noteHook("IbtpPrivacyEnabled", privacyFix ? 1 : 0);
-        // Arm the feature-word watch here, not when an ask shows up. The ask is a host command this
-        // hook may never be called for, and both 2.7.17 and 2.7.18 armed on it: if it never came, the
-        // watch stayed dead for the whole boot and reported nothing, which looks the same as "the
-        // answer is not on a read". Reads inside the window are passed through untouched.
-        featureWatchSpanNs = kFeatureWatchNs;
-        featureWatchArmedNs = nowNanoseconds();
-        __atomic_store_n(&featureWatchReads, kFeatureWatchReads, __ATOMIC_RELAXED);
-        noteHook("IbtpFeatureArmed", 1);
+        // On by default: Lilu already turns the whole plugin off on -ibtpoff, so patchScanning is
+        // the only switch left for the page rewrites.
+        scanPatchOn = !checkKernelArgument("-btlenoscan");
+        parkOn = checkKernelArgument("-ibtppark");
+        widenOn = checkKernelArgument("-ibtpwiden");
+        privacyOn = checkKernelArgument("-ibtpprivacy");
+        publishValue("IbtpParkEnabled", parkOn ? 1 : 0);
+        publishValue("IbtpWidenEnabled", widenOn ? 1 : 0);
+        publishValue("IbtpPrivacyEnabled", privacyOn ? 1 : 0);
+        // Arm the feature-word watch here, not when an ask shows up: the ask is a host command this
+        // hook may never be called for, and arming on it left the watch dead for the whole boot when
+        // it never came - indistinguishable from "the answer is not on a read". Reads inside the
+        // window pass through untouched.
+        watchSpanNs = kWatchSpanNs;
+        watchArmedNs = monotonicNs();
+        __atomic_store_n(&watchBudget, kWatchReads, __ATOMIC_RELAXED);
+        publishValue("IbtpFeatureArmed", 1);
         lilu.onPatcherLoadForce([](void *, KernelPatcher &patcher) {
-            KernelPatcher::RouteRequest route("_cs_validate_page", patched_cs_validate_page, orig_cs_validate);
+            KernelPatcher::RouteRequest route("_cs_validate_page", csValidatePageHook, csValidateOrig);
             if (!patcher.routeMultipleLong(KernelPatcher::KernelID, &route, 1))
                 SYSLOG("ibtp", "failed to route cs validation");
         });
-        hciLock = IOLockAlloc();
-        lengthLock = IOSimpleLockAlloc();
-        if (!lengthLock)
+        mirrorLock = IOLockAlloc();
+        featureLock = IOSimpleLockAlloc();
+        if (!featureLock)
             SYSLOG("ibtp", "no lock for the data length fix, it stays off");
         lilu.onKextLoadForce(&usbHostInfo, 1, [](void *, KernelPatcher &patcher, size_t index, mach_vm_address_t address, size_t size) {
-            if (index != usbHostInfo.loadIndex || !hciLock)
+            if (index != usbHostInfo.loadIndex || !mirrorLock)
                 return;
             KernelPatcher::RouteRequest route(
                 "__ZN15IOUSBHostDevice13deviceRequestEP9IOServiceRN11StandardUSB13DeviceRequestEPvP18IOMemoryDescriptorRjP19IOUSBHostCompletionj",
-                patched_device_request, orig_device_request);
+                deviceRequestHook, deviceRequestOrig);
             const bool routed = patcher.routeMultiple(index, &route, 1, address, size);
             if (!routed) {
                 SYSLOG("ibtp", "failed to route device request");
                 patcher.clearError();
             }
-            noteHook("IbtpHookRouted", routed ? 1 : 0);
+            publishValue("IbtpHookRouted", routed ? 1 : 0);
             // The LE Data Length Change fix also needs the pipe object and its completions.
             KernelPatcher::RouteRequest ioRoute("__ZN13IOUSBHostPipe2ioEP18IOMemoryDescriptorjP19IOUSBHostCompletionj",
-                                                patched_pipe_io, orig_pipe_io);
+                                                pipeIoHook, pipeIoOrig);
             const bool ioRouted = patcher.routeMultiple(index, &ioRoute, 1, address, size);
             if (!ioRouted) {
                 SYSLOG("ibtp", "failed to route pipe io");
                 patcher.clearError();
             }
-            // 26.5 and later take the configuration descriptor where older builds take the
-            // endpoint companion one. Only one of the two exists, so a miss is not an error.
+            // 26.5 and later take the configuration descriptor where older builds take the endpoint
+            // companion one. Only one of the two exists, so a miss is not an error.
             KernelPatcher::RouteRequest configRoute("__ZN13IOUSBHostPipe28initWithDescriptorsAndOwnersEPKN11StandardUSB18EndpointDescriptorEPKNS0_23ConfigurationDescriptorEP22AppleUSBHostControllerP15IOUSBHostDeviceP18IOUSBHostInterfaceht",
-                                                    patched_init_pipe_config, orig_init_pipe_config);
+                                                    initPipeConfigHook, initPipeConfigOrig);
             const bool configRouted = patcher.routeMultiple(index, &configRoute, 1, address, size);
             if (!configRouted)
                 patcher.clearError();
             KernelPatcher::RouteRequest initRoute("__ZN13IOUSBHostPipe28initWithDescriptorsAndOwnersEPKN11StandardUSB18EndpointDescriptorEPKNS0_37SuperSpeedEndpointCompanionDescriptorEP22AppleUSBHostControllerP15IOUSBHostDeviceP18IOUSBHostInterfaceht",
-                                                  patched_init_pipe, orig_init_pipe);
+                                                  initPipeHook, initPipeOrig);
             const bool initRouted = patcher.routeMultiple(index, &initRoute, 1, address, size);
             if (!initRouted)
                 patcher.clearError();
             if (!configRouted && !initRouted)
                 SYSLOG("ibtp", "failed to route pipe creation");
-            noteHook("IbtpPipeHooks", (configRouted ? 1U : 0U) | (initRouted ? 2U : 0U) | (ioRouted ? 4U : 0U));
+            publishValue("IbtpPipeHooks", (configRouted ? 1U : 0U) | (initRouted ? 2U : 0U) | (ioRouted ? 4U : 0U));
         });
     }
 };
 
-// Match Xcode's kext lifecycle. The kernel runs C++ initializers; libkmod
-// forwards the start/stop callbacks through _realmain and _antimain.
+// Match Xcode's kext lifecycle. The kernel runs C++ initializers; libkmod forwards the start/stop
+// callbacks through _realmain and _antimain.
 extern "C" {
 extern kern_return_t _start(kmod_info_t *, void *);
 extern kern_return_t _stop(kmod_info_t *, void *);
 extern kern_return_t IntelBTPatcher_kern_start(kmod_info_t *, void *);
 extern kern_return_t IntelBTPatcher_kern_stop(kmod_info_t *, void *);
 #ifdef IBTP_XCODE_KEXT_INFO
-// Xcode's kernel-extension target emits _kmod_info (name and version taken from the
-// MODULE_NAME / MODULE_VERSION build settings), so all that is left here are the entry points.
+// Xcode's kernel-extension target emits _kmod_info (name and version from the MODULE_NAME /
+// MODULE_VERSION build settings), so only the entry points are left here.
 kern_return_t _start(kmod_info_t *ki, void *data) { return IntelBTPatcher_kern_start(ki, data); }
 kern_return_t _stop(kmod_info_t *ki, void *data) { return IntelBTPatcher_kern_stop(ki, data); }
 #else
