@@ -453,6 +453,23 @@ int main() {
         CHECK(memcmp(stranger, copy, sizeof(copy)) == 0);
     }
 
+    // --- 9. The legacy seed is owed once per boot, and only after the controller accepted it.
+    {
+        Mirror s = baseState();
+        const uint8_t scanParams[10] = {0x0b, 0x20, 0x07, 0x01, 0x10, 0x00, 0x10, 0x00, 0x00, 0x00};
+        const uint8_t advEnable[4] = {0x0a, 0x20, 0x01, 0x01};
+        CHECK(wantsSeedLegacyAddress(s, scanParams, sizeof(scanParams)));
+        CHECK(!wantsSeedLegacyAddress(s, advEnable, sizeof(advEnable)));
+        // Asking is not a promise: a send that failed has to leave the debt unpaid.
+        CHECK(wantsSeedLegacyAddress(s, scanParams, sizeof(scanParams)));
+        noteSeedAccepted(s);
+        CHECK(!wantsSeedLegacyAddress(s, scanParams, sizeof(scanParams)));
+        // A controller reset re-arms it, the same way the host starts over.
+        const uint8_t reset[3] = {0x03, 0x0c, 0x00};
+        mirrorCommand(s, reset, sizeof(reset), true);
+        CHECK(wantsSeedLegacyAddress(s, scanParams, sizeof(scanParams)));
+    }
+
     if (failures) {
         printf("%d check(s) FAILED\n", failures);
         return 1;
