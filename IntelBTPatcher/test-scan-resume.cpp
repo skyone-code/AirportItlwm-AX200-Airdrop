@@ -470,6 +470,82 @@ int main() {
         CHECK(wantsSeedLegacyAddress(s, scanParams, sizeof(scanParams)));
     }
 
+    // --- 10. Advertising reports arrive in two layouts, and the create that names an identity
+    // address has to be turned into one the controller can act on.
+    {
+        // Extended report (subevent 0x0d): 16-bit flags, then type/address, 24 bytes of header.
+        uint8_t ext[30] = {0x3e, 28, 0x0d, 0x01,
+                           0x01, 0x00,             // connectable, undirected
+                           0x01,                   // random
+                           0xcf, 0x1a, 0xe5, 0x17, 0xe4, 0x5e,
+                           0x01, 0x00, 0x00, 0x00, // pHY, secondary, sid, tx power
+                           0xc4,                   // rssi -60
+                           0x00, 0x00,             // periodic interval
+                           0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // direct type + address
+                           0x02, 0x02, 0x01};      // data length, data
+        Report items[8] {};
+        CHECK(parseReports(ext, sizeof(ext), items, 8) == 1);
+        const uint8_t rpa[6] = {0xcf, 0x1a, 0xe5, 0x17, 0xe4, 0x5e};
+        CHECK(addressEquals(items[0].addr, rpa));
+        CHECK(items[0].extended);
+        CHECK((items[0].eventType & 0x7f) == 0x00);
+        CHECK(reportConnectable(items[0].eventType));
+        CHECK(items[0].addrType == 0x01);
+        CHECK(items[0].rssi == 0xc4);
+        CHECK(addressResolvable(items[0].addr));
+
+        // Same layout, scannable instead of connectable: it must not be offered as a create target.
+        ext[4] = 0x02;
+        CHECK(parseReports(ext, sizeof(ext), items, 8) == 1);
+        CHECK(!reportConnectable(items[0].eventType));
+        CHECK((items[0].eventType & 0x7f) == 0x02);
+        ext[4] = 0x01;
+
+        // Legacy report (subevent 0x02) keeps its own offsets and must still parse. Its RSSI sits
+        // after the payload, one byte past the data.
+        uint8_t legacy[16] = {0x3e, 14, 0x02, 0x01, 0x00, 0x00,
+                              0xf0, 0xc3, 0x71, 0x17, 0x26, 0x25,
+                              0x02, 0x02, 0x01, 0xb4};
+        CHECK(parseReports(legacy, sizeof(legacy), items, 8) == 1);
+        CHECK(!items[0].extended);
+        CHECK(items[0].addr[0] == 0xf0 && items[0].addr[5] == 0x25);
+        CHECK(items[0].rssi == 0xb4);
+        CHECK(!addressResolvable(items[0].addr));
+
+        // An extended create that names no peer and filters on the accept list cannot match anything
+        // the air carries: it is rewritten to name the rotating address directly.
+        uint8_t create[16] = {0x43, 0x20, 0x0d, 0x01, 0x01, 0x00, 0, 0, 0, 0, 0, 0, 0x00, 0x00, 0x00, 0x00};
+        CHECK(rewriteCreateToPrivateAddress(create, sizeof(create), rpa, true) == 6);
+        CHECK(create[3] == kCreatePolicyPeer);
+        CHECK(create[5] == 0x01);
+        CHECK(addressEquals(create + 6, rpa));
+        // Everything past the peer address is the host's own scan timing and stays untouched.
+        CHECK(create[12] == 0x00 && create[15] == 0x00);
+
+        // The legacy create gets the same treatment, at its own offsets: policy 7, type 8, peer 9.
+        uint8_t legacyOk[16] = {0x0d, 0x20, 0x0d, 0x01, 0x01, 0x00, 0x00, 0x01, 0x01, 0, 0, 0, 0, 0, 0, 0};
+        CHECK(rewriteCreateToPrivateAddress(legacyOk, sizeof(legacyOk), rpa, true) == 9);
+        CHECK(legacyOk[7] == kCreatePolicyPeer);
+        CHECK(legacyOk[8] == 0x01);
+        CHECK(addressEquals(legacyOk + 9, rpa));
+        CHECK(legacyOk[3] == 0x01 && legacyOk[4] == 0x01);   // scan timing untouched
+
+        // Nothing is touched when the address is stale, the policy is already explicit, a peer was
+        // named, or the command is neither create.
+        uint8_t stale[16] = {0x43, 0x20, 0x0d, 0x01, 0x01, 0x00, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+        CHECK(rewriteCreateToPrivateAddress(stale, sizeof(stale), rpa, false) == 0);
+        CHECK(stale[3] == 0x01);
+        uint8_t direct[16] = {0x43, 0x20, 0x0d, 0x00, 0x01, 0x00, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+        CHECK(rewriteCreateToPrivateAddress(direct, sizeof(direct), rpa, true) == 0);
+        uint8_t named[16] = {0x43, 0x20, 0x0d, 0x01, 0x01, 0x00, 0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff, 0, 0, 0, 0};
+        CHECK(rewriteCreateToPrivateAddress(named, sizeof(named), rpa, true) == 0);
+        // Legacy with a policy other than accept-list, and a non-create opcode.
+        uint8_t legacyDirect[16] = {0x0d, 0x20, 0x0d, 0, 0, 0, 0, 0x00, 0x00, 0, 0, 0, 0, 0, 0, 0};
+        CHECK(rewriteCreateToPrivateAddress(legacyDirect, sizeof(legacyDirect), rpa, true) == 0);
+        uint8_t notCreate[16] = {0x0b, 0x20, 0x0d, 0x01, 0x01, 0x00, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+        CHECK(rewriteCreateToPrivateAddress(notCreate, sizeof(notCreate), rpa, true) == 0);
+    }
+
     if (failures) {
         printf("%d check(s) FAILED\n", failures);
         return 1;

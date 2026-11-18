@@ -34,6 +34,16 @@ static bool widenOn {};
 // is why every create with filter policy 1 scans six seconds and dies: the accept list holds
 // identity addresses while peers advertise with a resolvable private address nobody can resolve.
 static bool privacyOn {};
+// -ibtpnorpa turns off the one rewrite that makes an outgoing connection possible at all. On by
+// default because it is the only thing standing between the host and a create that cannot match:
+// the accept list holds a phone's identity address while the air carries its rotating one.
+static bool rpaOn {true};
+// Thirty seconds, not the five first assumed: a resolvable private address rotates on the order of
+// fifteen minutes, so an address heard half a minute ago is still the one on the air, while creates
+// often land many seconds after the last sighting (bluetoothd hears the phone roughly once every
+// six seconds on this controller). A stale-but-real address costs a timeout at worst; an
+// over-strict window costs the rewrite itself.
+enum : uint64_t { kRpaFreshNs = 30000000000ULL };
 
 // ---- telemetry -------------------------------------------------------------------------
 // Evidence for tests, in the I/O Registry root. Written only on rare events, in thread context.
@@ -94,6 +104,13 @@ static mach_vm_address_t pipeIoOrig {};
 static mach_vm_address_t initPipeOrig {};
 static mach_vm_address_t initPipeConfigOrig {};
 static void *eventPipe {};
+// The pipe's own constructor cannot be routed on this build, so the interrupt IN pipe is learned from
+// its traffic instead: reads are wrapped on a budget until one of them is recognisably an HCI event.
+// Before this, eventPipe stayed null for the whole boot and no event was ever seen - all the
+// advertising-report and connection witnesses below were dead code, which is how a create that never
+// matched looked identical to one that was never attempted.
+static uint32_t probeLeft {}, eventPipeFound {};
+enum : uint32_t { kProbeReads = 8192 };
 // Written when a command goes out (any thread), read when an interrupt read is submitted or
 // completes (the USB workloop). featureLock is a spinlock held only around the board itself: never
 // across a USB call, an allocation or a registry write. It is taken after mirrorLock, never before.
@@ -151,6 +168,16 @@ static bool inviteSaved;
 // never heard on the air is an identity address, and no timeout will ever find it.
 static uint8_t acceptAddr[6] {};
 static uint32_t acceptAddrHeard, advAddrCount;
+// The newest connectable resolvable private address heard on the air, and when. bluetoothd keeps its
+// IRKs in user space and resolves the phone's rotating address itself, so the controller is handed
+// the phone's permanent identity address and asked to match it against a list of the same - while the
+// air only ever carries the rotating form. A policy-1 create then waits out its full timeout and
+// bluetoothd cancels it. This is the one address the controller can act on without an IRK, so it is
+// kept with its age: a rotating address that has not been refreshed is worse than none.
+static uint8_t rpaAddr[6];
+static uint64_t rpaStamp;
+static uint32_t rpaSeen, rpaRewrites, rpaMissed, rpaWriteFails, extReports;
+static uint32_t advMetaSeen;
 static void witnessAdvData(const uint8_t *hci, size_t length) {
     Ibtp::PayloadRange payload {};
     if (!Ibtp::payloadRange(hci, length, &payload))
@@ -172,15 +199,38 @@ static void witnessAdvData(const uint8_t *hci, size_t length) {
     }
 }
 static void witnessAdvReport(const uint8_t *event, size_t size) {
+    // Every advertising report the pipe delivers, parsed or not: if this grows while the parsed
+    // counters stay empty the parser is wrong, not the controller.
+    if (!(++advMetaSeen & 31))
+        publishValue("IbtpAdvMeta", advMetaSeen);
     Ibtp::Report items[8] {};
     const int count = Ibtp::parseReports(event, size, items, 8);
     if (count <= 0)
         return;
+    const uint64_t now = monotonicNs();
+    if (event[2] == Ibtp::kSubExtAdvReport)
+        publishValue("IbtpAdvExtReports", ++extReports);
     uint32_t types = 0;
     for (int i = 0; i < count; ++i) {
         types |= items[i].appleTypes;
-        if (items[i].eventType < 32)
-            reportEvtMask |= 1U << items[i].eventType;
+        // The flag word only exists in the extended form, so it is what gets published: a host that
+        // never asks for legacy reports leaves this at zero even while it scans continuously.
+        const uint8_t kind = items[i].eventType & 0x7f;
+        if (items[i].eventType & Ibtp::kReportExtended)
+            reportEvtMask |= 1U << kind;
+        // The freshest connectable resolvable address is the only handle on the phone that does not
+        // need its IRK. Refresh on every sighting: an address that stops appearing has rotated away.
+        if (Ibtp::reportConnectable(items[i].eventType) && Ibtp::addressResolvable(items[i].addr)) {
+            if (!Ibtp::addressEquals(items[i].addr, rpaAddr)) {
+                lilu_os_memcpy(rpaAddr, items[i].addr, sizeof(rpaAddr));
+                if (OSData *raw = OSData::withBytes(rpaAddr, sizeof(rpaAddr))) {
+                    IORegistryEntry::getRegistryRoot()->setProperty("IbtpRpaLast", raw);
+                    raw->release();
+                }
+            }
+            rpaStamp = now;
+            publishValue("IbtpRpaSeen", ++rpaSeen);
+        }
     }
     lastRssi = uint32_t(items[count - 1].rssi);
     reportTypeMask |= types;
@@ -360,6 +410,13 @@ static IOReturn deviceRequestHook(void *that, IOService *provider, StandardUSB::
                                   IOUSBHostCompletion *completion, uint32_t timeout) {
     uint8_t hci[32] = {};
     size_t hciLength = 0;
+    // Set only when the descriptor's own bytes were rewritten below: the hold is already gone by the
+    // time the mirror section runs, and a second prepare/write round on this stack's descriptor is
+    // not available (prepare fails, and an unwired writeBytes panics - the "IOGMD: not wired" crash
+    // 2.7.10 died on).
+    bool createRewritten {};
+    bool createWriteFailed {};
+    size_t createPeerOffset {};     // where the six rewritten peer bytes sit, 0 when untouched
     // Every USB device passes through here, so only the Intel Bluetooth controller is of interest.
     // Class requests to the device carry HCI commands; bRequest says nothing useful about that.
     if (mirrorLock && (request.bmRequestType == 0x20 || request.bmRequestType == 0x21) && isOurController(that)) {
@@ -367,9 +424,41 @@ static IOReturn deviceRequestHook(void *that, IOService *provider, StandardUSB::
             hciLength = min(size_t(request.wLength), sizeof(hci));
             lilu_os_memcpy(hci, data, hciLength);
         } else if (descriptor && descriptor->prepare(kIODirectionOut) == kIOReturnSuccess) {
-            hciLength = min(size_t(descriptor->getLength()), sizeof(hci));
+            // The request length, not the descriptor's capacity, bounds the copy: the stack maps
+            // exactly wLength bytes of this buffer.
+            hciLength = min(min(size_t(request.wLength), size_t(descriptor->getLength())), sizeof(hci));
             descriptor->readBytes(0, hci, hciLength);
             descriptor->complete(kIODirectionOut);
+            // The rewrite runs in a second prepare/complete pair, and the direction flips: the
+            // header contract is explicit that writeBytes requires the descriptor prepared
+            // kIODirectionIn while readBytes requires kIODirectionOut - the bit describes the
+            // device side, so host-to-memory PIO needs In no matter which way the USB transfer
+            // runs. Writing inside the read's Out window (2.4.2.3) violated the contract and was
+            // refused on every create, and re-preparing far from the read (2.4.2.2) lost the wire
+            // state on top of that. An unwired write panics ("IOGMD: not wired", the 2.7.10 crash),
+            // so the In hold before writeBytes is mandatory, not optional.
+            const uint16_t earlyOp = hciLength >= 3 ? Ibtp::opcodeOf(hci) : 0;
+            const bool rpaFresh = rpaStamp && monotonicNs() - rpaStamp < kRpaFreshNs;
+            if (earlyOp && rpaOn &&
+                (createPeerOffset = Ibtp::rewriteCreateToPrivateAddress(hci, hciLength, rpaAddr, rpaFresh)) != 0) {
+                const IOReturn prepped = descriptor->prepare(kIODirectionIn);
+                if (prepped == kIOReturnSuccess) {
+                    const size_t wrote = descriptor->writeBytes(0, hci, hciLength);
+                    createRewritten = wrote == hciLength;
+                    createWriteFailed = !createRewritten;
+                    if (createWriteFailed) {
+                        // Counts alone cannot say why a prepared write is refused; keep the numbers.
+                        publishValue("IbtpRpaWriteRet", uint32_t(wrote));
+                        publishValue("IbtpRpaCmdLen", uint32_t(hciLength));
+                        publishValue("IbtpRpaDescLen", uint32_t(descriptor->getLength()));
+                        publishValue("IbtpRpaReqLen", request.wLength);
+                    }
+                    descriptor->complete(kIODirectionIn);
+                } else {
+                    createWriteFailed = true;
+                    publishValue("IbtpRpaPrepInRet", uint32_t(prepped));
+                }
+            }
         }
     }
     bool seedLegacyAddress = false;
@@ -431,6 +520,37 @@ static IOReturn deviceRequestHook(void *that, IOService *provider, StandardUSB::
         if (isCreate) {
             publishValue("IbtpLeCreates", ++createsSeen);
             witnessCreate(hci, hciLength);
+            // The rotating address is only usable while it is still the one on the air. Five seconds
+            // is several advertising intervals at every interval the phone uses, so a stale value is
+            // already gone by the time the create would leave.
+            const bool rpaFresh = rpaStamp && monotonicNs() - rpaStamp < kRpaFreshNs;
+            bool written = createRewritten;
+            if (!written && data && rpaOn) {
+                const size_t peerAt = Ibtp::rewriteCreateToPrivateAddress(hci, hciLength, rpaAddr, rpaFresh);
+                if (peerAt) {
+                    // The direct-buffer route: the caller's own buffer is editable in place.
+                    lilu_os_memcpy(data, hci, hciLength);
+                    written = true;
+                    createPeerOffset = peerAt;
+                }
+            }
+            if (written) {
+                publishValue("IbtpCreateRpa", ++rpaRewrites);
+                // What actually left the machine: the six peer bytes, so a dead create can be told
+                // from one aimed at a stale address. Extended form: policy[3], peerType[4],
+                // peer[6..11]; legacy: policy[7], peerType[8], peer[9..14].
+                if (OSData *raw = OSData::withBytes(hci + createPeerOffset, 6)) {
+                    IORegistryEntry::getRegistryRoot()->setProperty("IbtpRpaApplied", raw);
+                    raw->release();
+                }
+            } else if (createWriteFailed) {
+                // Conditions matched at the top but the prepared write was refused - counted apart
+                // from a stale address, because this one needs code, not patience.
+                publishValue("IbtpRpaWriteFails", ++rpaWriteFails);
+            } else if (rpaOn) {
+                // No usable private address when the create left: stale or never heard.
+                publishValue("IbtpCreateRpaSkipped", ++rpaMissed);
+            }
             // Park scanning and advertising for the create; the helper remembers what it switched off
             // so the attempt-ending event can put back exactly that.
             preCount = Ibtp::parkBeforeCreate(mirror, park, hci, hciLength, pres, parkOn);
@@ -597,6 +717,7 @@ static int initPipeConfigHook(void *that, StandardUSB::EndpointDescriptor const 
 struct WrappedRead {
     IOUSBHostCompletion original;
     IOMemoryDescriptor *buffer;
+    void *pipe;                     // which pipe this read belongs to, so the event one can be learned
     IOUSBHostCompletion wrapped;    // handed to the USB stack, so the caller's own is never edited
 };
 
@@ -618,18 +739,29 @@ static void readCompletion(void *owner, void *parameter, IOReturn status, uint32
     if (held) {
         // Anything shorter than 6 bytes cannot be one of the rewritten events.
         if (bytesTransferred >= 6) {
-            uint8_t event[32] = {};
+            // The full HCI event is wanted here, not a 32-byte window: an extended advertising
+            // report approaches the 257-byte event maximum, and a window cut mid-payload fails
+            // the parser's bounds check, which looks exactly like "no report ever arrived".
+            uint8_t event[260] = {};
             const size_t size = min(min(size_t(bytesTransferred), sizeof(event)), size_t(buffer->getLength()));
             buffer->readBytes(0, event, size);
+            // The first read that is recognisably an HCI event names the pipe it arrived on. Once
+            // known, only that pipe is wrapped again, so probing costs a bounded number of reads.
+            if (!eventPipe && Ibtp::looksLikeHciEvent(event, size)) {
+                eventPipe = delayed->pipe;
+                publishValue("IbtpEventPipe", ++eventPipeFound);
+            }
             // A connection attempt that just ended releases what was parked for it; the next outgoing
             // command carries the restore.
             Ibtp::observeEndingEvent(park, event, size);
             // Unconditional HCI witness: the controller's verdict on the last create, park or no
             // park. Gating it on the park meant a silent no-park run left no evidence at all (2.7.7
             // went in blind that way).
-            if (event[0] == Ibtp::kEvtLeMeta && size >= 5 && event[2] == Ibtp::kSubAdvReport) {
+            if (event[0] == Ibtp::kEvtLeMeta && size >= 5 &&
+                (event[2] == Ibtp::kSubAdvReport || event[2] == Ibtp::kSubExtAdvReport)) {
                 // Advertising reports are pure observation: what the phone says - and whether what it
-                // says is connectable - decides whether any create can land.
+                // says is connectable - decides whether any create can land. bluetoothd scans with
+                // the extended commands here, so subevent 0x0d is the form that actually arrives.
                 witnessAdvReport(event, size);
             } else if (event[0] == Ibtp::kEvtCmdComplete && size >= 8 &&
                        uint16_t(event[3] | event[4] << 8) == createOp) {
@@ -727,31 +859,43 @@ static void readCompletion(void *owner, void *parameter, IOReturn status, uint32
         original.action(original.owner, parameter, status, bytesTransferred);
 }
 
-// The park has to see the event that ends it, but 0.9.1 wrapped every read for as long as the park
-// stayed open - the same unbounded hijack of the event pipe in another coat. So it gets its own
-// budget: a read count and a wall-clock window. If either runs out, the stall guard in
-// restoreAfterCreate puts scanning back on the next host command, exactly as it would have anyway.
-enum : uint32_t { kParkWrapBudget = 256 };
-enum : uint64_t { kParkWrapWindowNs = 1000000000ULL };
-static uint32_t parkWraps {};
-static uint64_t parkArmedNs {};
-
+// The park sees the event that ends it through the always-on event tap: no budget of its own any
+// more, the completion forwards everything and the stall guard in restoreAfterCreate still puts
+// scanning back on the next host command if an ending never comes.
 static IOReturn pipeIoHook(void *that, IOMemoryDescriptor *dataBuffer, uint32_t bytesTransferred,
                            IOUSBHostCompletion *completion, uint32_t completionTimeoutMs) {
-    bool wrap = false, parkWrap = false;
+    bool wrap = false, probe = false;
     const bool knownPipe = that == eventPipe;
     const uint64_t now = monotonicNs();
     const uint32_t watchLeft = __atomic_load_n(&watchBudget, __ATOMIC_RELAXED);
     const bool watchLive = watchLeft != 0 && watchArmedNs != 0 && now - watchArmedNs < watchSpanNs;
-    if (completion && dataBuffer && (knownPipe || watchLive)) {
-        if (knownPipe) {
-            if (!park.parked) {
-                parkWraps = 0;
-                parkArmedNs = now;
+    // Until the event pipe is known, every read is a candidate: the one whose payload parses as an
+    // HCI event is the pipe, and the read it was seen on is too late to be wrapped anyway. The budget
+    // bounds this to a fixed number of reads, so a controller that never reports cannot keep the
+    // whole pipe permanently hijacked.
+    if (!eventPipe && __atomic_load_n(&probeLeft, __ATOMIC_RELAXED) && completion && dataBuffer &&
+        dataBuffer->getLength() >= 6) {
+        uint32_t left = __atomic_load_n(&probeLeft, __ATOMIC_RELAXED);
+        while (left) {
+            if (__atomic_compare_exchange_n(&probeLeft, &left, left - 1, false, __ATOMIC_RELAXED,
+                                            __ATOMIC_RELAXED)) {
+                probe = true;
+                break;
             }
+        }
+    }
+    if (completion && dataBuffer && (knownPipe || watchLive || probe)) {
+        if (knownPipe) {
+            // Once the event pipe is known, every read of it is wrapped. A budgeted tap was the
+            // first 2.4.2.1 design and it starved: only reads a feature round happened to await
+            // ever reached the completion, so the advertising witness never saw a report and the
+            // create rewrite had no address to work with. Forging decisions stay inside
+            // forgeEvent's own round logic, so an always-on tap cannot rewrite more than before,
+            // and the ending event the park waits for now arrives reliably as well.
+            wrap = true;
             if (featureLock) {
                 IOSimpleLockLock(featureLock);
-                wrap = Ibtp::takeWrap(features, now, dataBuffer->getLength());
+                Ibtp::sweepSlots(features, now);
                 const uint32_t expired = features.expired, aborts = features.aborts;
                 IOSimpleLockUnlock(featureLock);
                 // Counters of their own: IbtpLengthFailures counts copies that could not be sent or
@@ -759,13 +903,8 @@ static IOReturn pipeIoHook(void *that, IOMemoryDescriptor *dataBuffer, uint32_t 
                 publishIfChanged("IbtpLengthExpired", expired, expiredSeen);
                 publishIfChanged("IbtpLengthAborts", aborts, abortsSeen);
             }
-            if (!wrap && park.parked && parkWraps < kParkWrapBudget && now - parkArmedNs < kParkWrapWindowNs &&
-                dataBuffer->getLength() >= Ibtp::kDataLengthLen) {
-                ++parkWraps;
-                parkWrap = true;
-            }
         }
-        if (!wrap && !parkWrap && watchLive && dataBuffer->getLength() >= Ibtp::kDataLengthLen) {
+        if (!wrap && watchLive && dataBuffer->getLength() >= Ibtp::kDataLengthLen) {
             uint32_t left = watchLeft;
             while (left) {
                 if (__atomic_compare_exchange_n(&watchBudget, &left, left - 1, false,
@@ -779,7 +918,7 @@ static IOReturn pipeIoHook(void *that, IOMemoryDescriptor *dataBuffer, uint32_t 
             }
         }
     }
-    if (wrap || parkWrap) {
+    if (wrap || probe) {
         auto *delayed = static_cast<WrappedRead *>(IOMalloc(sizeof(WrappedRead)));
         if (delayed) {
             // The caller's completion is never modified: ours is a copy in the same allocation, so a
@@ -787,6 +926,7 @@ static IOReturn pipeIoHook(void *that, IOMemoryDescriptor *dataBuffer, uint32_t 
             // failed submit leaves the caller's structure as it was.
             delayed->original = *completion;
             delayed->buffer = dataBuffer;
+            delayed->pipe = that;
             delayed->wrapped = *completion;
             delayed->wrapped.action = readCompletion;
             delayed->wrapped.owner = delayed;
@@ -835,9 +975,18 @@ PluginConfiguration ADDPR(config) {
         parkOn = checkKernelArgument("-ibtppark");
         widenOn = checkKernelArgument("-ibtpwiden");
         privacyOn = checkKernelArgument("-ibtpprivacy");
+        rpaOn = !checkKernelArgument("-ibtpnorpa");
         publishValue("IbtpParkEnabled", parkOn ? 1 : 0);
         publishValue("IbtpWidenEnabled", widenOn ? 1 : 0);
         publishValue("IbtpPrivacyEnabled", privacyOn ? 1 : 0);
+        publishValue("IbtpRpaEnabled", rpaOn ? 1 : 0);
+        // Iteration tag, not a bundle version. The kernel's kext version parser takes three numeric
+        // fields and stops - measured, not assumed: with CFBundleVersion set to "2.4.2.1", kmutil
+        // silently dropped the whole bundle from its scan ("No extension with identifier"), which
+        // would have failed the injection quietly. So the bundle stays at 2.4.2 and the in-flight
+        // iteration lives here and in the archive name; a finalized build moves the real version to
+        // 2.4.3 instead.
+        IORegistryEntry::getRegistryRoot()->setProperty("IbtpBuild", "2.4.2.4");
         // Arm the feature-word watch here, not when an ask shows up: the ask is a host command this
         // hook may never be called for, and arming on it left the watch dead for the whole boot when
         // it never came - indistinguishable from "the answer is not on a read". Reads inside the
@@ -845,6 +994,7 @@ PluginConfiguration ADDPR(config) {
         watchSpanNs = kWatchSpanNs;
         watchArmedNs = monotonicNs();
         __atomic_store_n(&watchBudget, kWatchReads, __ATOMIC_RELAXED);
+        __atomic_store_n(&probeLeft, kProbeReads, __ATOMIC_RELAXED);
         publishValue("IbtpFeatureArmed", 1);
         lilu.onPatcherLoadForce([](void *, KernelPatcher &patcher) {
             KernelPatcher::RouteRequest route("_cs_validate_page", csValidatePageHook, csValidateOrig);
