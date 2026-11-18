@@ -170,7 +170,6 @@ IOReturn AirportItlwmSkywalkInterface::wclCommand(OSObject *, void *a0, void *a1
     auto self = static_cast<AirportItlwmSkywalkInterface *>(a0);
     if (self->wclStopping)
         return kIOReturnNotReady;
-    XYLog("WCLOp enter: op=%llu a2=%p\n", uintptr_t(a1), a2);
     switch (uintptr_t(a1)) {
         case 13: return self->copyWCLChannels(a2);
         case 14: return self->copyWCLTrafficCounters(a2);
@@ -203,7 +202,6 @@ IOReturn AirportItlwmSkywalkInterface::wclCommand(OSObject *, void *a0, void *a1
             self->finishWCLScan(kIOReturnAborted);
             return kIOReturnSuccess;
     }
-    XYLog("WCLOp unsupported: op=%llu a2=%p\n", uintptr_t(a1), a2);
     return kIOReturnUnsupported;
 }
 
@@ -239,39 +237,23 @@ IOReturn AirportItlwmSkywalkInterface::setWCL_LEAVE_NETWORK(apple80211_leave_net
 IOReturn AirportItlwmSkywalkInterface::beginWCLScan(apple80211ScanRequest *request)
 {
     AirportWCL::ScanRequest scan;
-    if (!AirportWCL::decodeScan(request, 0x1550, scan)) {
-        XYLog("WCLScan decode failed: request=%p\n", request);
+    if (!AirportWCL::decodeScan(request, 0x1550, scan))
         return kIOReturnBadArgument;
-    }
     ieee80211com *ic = fHalService->get80211Controller();
-    XYLog("WCLScan enter: type=%u ssidLen=%u chCount=%u chFirst=%u pending=%u join=%u bgscan=%u state=%d\n",
-          scan.type, scan.ssidLength, scan.channelCount,
-          scan.channelCount ? scan.channels[0] : 0,
-          scanPending ? 1 : 0, joinPending ? 1 : 0,
-          (ic->ic_flags & IEEE80211_F_BGSCAN) ? 1 : 0, ic->ic_state);
     if (!(ic->ic_if.if_flags & IFF_RUNNING))
         return kIOReturnNotReady;
-    if (scanPending || joinPending || (ic->ic_flags & IEEE80211_F_BGSCAN)) {
-        XYLog("WCLScan busy: pending=%u join=%u bgscan=%u\n",
-              scanPending ? 1 : 0, joinPending ? 1 : 0,
-              (ic->ic_flags & IEEE80211_F_BGSCAN) ? 1 : 0);
+    if (scanPending || joinPending || (ic->ic_flags & IEEE80211_F_BGSCAN))
         return kIOReturnBusy;
-    }
-    if (ic->ic_state == IEEE80211_S_AUTH || ic->ic_state == IEEE80211_S_ASSOC) {
-        XYLog("WCLScan busy: auth/assoc state=%d\n", ic->ic_state);
+    if (ic->ic_state == IEEE80211_S_AUTH || ic->ic_state == IEEE80211_S_ASSOC)
         return kIOReturnBusy;
-    }
     if (scan.channelCount) {
         bool usable = false;
         for (unsigned channel = 1; channel <= IEEE80211_CHAN_MAX; ++channel)
             if (ic->ic_channels[channel].ic_flags &&
                 AirportWCL::scanChannelSelected(scan.channels, true, channel))
                 usable = true;
-        if (!usable) {
-            XYLog("WCLScan unsupported: chCount=%u chFirst=%u, none usable\n",
-                  scan.channelCount, scan.channels[0]);
+        if (!usable)
             return kIOReturnUnsupported;
-        }
     }
     scanPending = true;
     scanCompleted = false;
@@ -288,7 +270,6 @@ IOReturn AirportItlwmSkywalkInterface::beginWCLScan(apple80211ScanRequest *reque
     if (ic->ic_state == IEEE80211_S_RUN) {
         ieee80211_begin_cache_bgscan(&ic->ic_if);
         if (!(ic->ic_flags & IEEE80211_F_BGSCAN)) {
-            XYLog("WCLScan busy: bgscan not started in RUN\n");
             scanPending = false;
             ic->ic_wcl_scan_requested = false;
             scanSource->cancelTimeout();
@@ -297,14 +278,12 @@ IOReturn AirportItlwmSkywalkInterface::beginWCLScan(apple80211ScanRequest *reque
     } else if (ic->ic_state != IEEE80211_S_SCAN) {
         int error = ic->ic_newstate(ic, IEEE80211_S_SCAN, -1);
         if (error) {
-            XYLog("WCLScan error: newstate -> SCAN failed %d\n", error);
             scanPending = false;
             ic->ic_wcl_scan_requested = false;
             scanSource->cancelTimeout();
             return kIOReturnError;
         }
     }
-    XYLog("WCLScan accepted\n");
     return kIOReturnSuccess;
 }
 
@@ -312,7 +291,6 @@ void AirportItlwmSkywalkInterface::finishWCLScan(IOReturn status)
 {
     if (!scanPending)
         return;
-    XYLog("WCLScan finish: status=0x%x\n", status);
     scanPending = false;
     scanCompleted = false;
     scanSource->cancelTimeout();
@@ -1061,23 +1039,6 @@ IOReturn AirportItlwmSkywalkInterface::copyWCLChannels(void *data)
     apple80211_country_code_data country = {};
     if (instance->getCOUNTRY_CODE(static_cast<OSObject *>(this), &country) == kIOReturnSuccess)
         memcpy(info->country, country.cc, sizeof(country.cc));
-    unsigned chans5g = 0, ch149 = 0, ch153 = 0, ch157 = 0, ch161 = 0, ch165 = 0;
-    for (unsigned i = 1; i <= IEEE80211_CHAN_MAX && i < 400; ++i) {
-        if (!isset(ic->ic_chan_active, i) || !ic->ic_channels[i].ic_freq)
-            continue;
-        if (!IEEE80211_IS_CHAN_5GHZ(&ic->ic_channels[i]))
-            continue;
-        ++chans5g;
-        switch (i) {
-            case 149: ch149 = 1; break;
-            case 153: ch153 = 1; break;
-            case 157: ch157 = 1; break;
-            case 161: ch161 = 1; break;
-            case 165: ch165 = 1; break;
-        }
-    }
-    XYLog("WCLChannels: count=%u country=%.4s 5g=%u ch149=%u ch153=%u ch157=%u ch161=%u ch165=%u\n",
-          info->count, info->country, chans5g, ch149, ch153, ch157, ch161, ch165);
     return info->count ? kIOReturnSuccess : kIOReturnNotReady;
 }
 

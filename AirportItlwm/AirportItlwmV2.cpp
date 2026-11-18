@@ -2514,7 +2514,17 @@ getCARD_CAPABILITIES(OSObject *object,
     }
     cd->capabilities[2] = (1 << (APPLE80211_CAP_WME - 16)) |
         (1 << (APPLE80211_CAP_SHORT_GI_40MHZ - 16)) |
-        (1 << (APPLE80211_CAP_SHORT_GI_20MHZ - 16));
+        (1 << (APPLE80211_CAP_SHORT_GI_20MHZ - 16)) |
+        0x40;
+    // Byte 2 bit 6 is required by Apple80211Scan for non-basic scan types
+    // (directed scans, e.g. personal hotspot joins). Without it the scan is
+    // rejected in userspace with -3903 before reaching the driver.
+    // Byte 9 bit 1 routes Apple80211Scan to the single SCAN_REQ path. Without
+    // it the directed scan is sent as SCAN_REQ_MULTIPLE, which has no handler
+    // in Tahoe's kernel routing tables and fails with errno 102 (EOPNOTSUPP)
+    // before reaching the driver.
+    cd->capabilities[8] |= 0x01;
+    cd->capabilities[9] |= 0x02;
     // Tahoe WCLDeviceConfiguration::isHeSupported reads byte 17, bit 7.
     // WCL uses this capability together with the BSS HE IE for PHY reporting.
     if (caps & IEEE80211_C_HE)

@@ -983,10 +983,10 @@ PluginConfiguration ADDPR(config) {
         // Iteration tag, not a bundle version. The kernel's kext version parser takes three numeric
         // fields and stops - measured, not assumed: with CFBundleVersion set to "2.4.2.1", kmutil
         // silently dropped the whole bundle from its scan ("No extension with identifier"), which
-        // would have failed the injection quietly. So the bundle stays at 2.4.2 and the in-flight
-        // iteration lives here and in the archive name; a finalized build moves the real version to
-        // 2.4.3 instead.
-        IORegistryEntry::getRegistryRoot()->setProperty("IbtpBuild", "2.4.2.4");
+        // would have failed the injection quietly. So the bundle version was frozen at 2.4.2 while
+        // the in-flight iteration lived here and in the archive name; this finalized build moves
+        // the real version to 2.4.3.
+        IORegistryEntry::getRegistryRoot()->setProperty("IbtpBuild", "2.4.3");
         // Arm the feature-word watch here, not when an ask shows up: the ask is a host command this
         // hook may never be called for, and arming on it left the watch dead for the whole boot when
         // it never came - indistinguishable from "the answer is not on a read". Reads inside the
