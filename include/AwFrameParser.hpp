@@ -5,7 +5,7 @@
 #include <stddef.h>
 #include <stdint.h>
 
-namespace ItlAWDL {
+namespace Aw {
 enum class ParseResult { NotAWDL, Malformed, Unsupported, Valid };
 
 struct ActionFrame {
@@ -131,4 +131,4 @@ inline ParseResult parseCapturedAction(const uint8_t *frame, size_t capturedLeng
         *frameLength = length;
     return result;
 }
-} // namespace ItlAWDL
+} // namespace Aw

@@ -1,7 +1,7 @@
 // Read-only decoder for nonaggregated AWDL IPv6 data frames. No peer admission.
 #pragma once
-#include <AWDLDataPayload.hpp>
-namespace ItlAWDL {
+#include <AwDataPayload.hpp>
+namespace Aw {
 struct DataFrameView {
     IPv6PayloadView ip;
     const uint8_t *source;

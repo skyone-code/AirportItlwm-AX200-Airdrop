@@ -6,7 +6,7 @@
 - 系统是 macOS 26.7.x（Tahoe）/ 15.8.x（Sequoia）/ 14.8.9（Sonoma），仅 x86_64
 - 已删除旧的 `AirportItlwm.kext`（上游原生版）或 `itlwm.kext` + HeliPort
 
-三者互斥：同一个 `IOClass` 只能被一个 kext 占用。旧的没删干净时，AirDrop 不会出现，`ioreg` 里也看不到 `ItlwmAWDL*` 属性。
+三者互斥：同一个 `IOClass` 只能被一个 kext 占用。旧的没删干净时，AirDrop 不会出现，`ioreg` 里也看不到 `r2vhj*` 属性。
 
 ## 一、放 kext
 
@@ -47,9 +47,9 @@ kmutil showloaded --list-only | grep -i airportitlwm
 ioreg -rn AirportItlwm | grep -E "AWDLBuildCheck|AWDLNativeUp|AWDLInterfaceBuild"
 ```
 
-期望：`CFBundleVersion = 2.5.10`，`ItlwmAWDLBuildCheck = verified`，`ItlwmAWDLNativeUp = Yes`。
+期望：`CFBundleVersion = 2.5.10`，`r2vhjBuildCheck = verified`，`r2vhjNativeUp = Yes`。
 
-若 `ItlwmAWDLActivationBlocked` 有值，按 [DIAGNOSTICS.md](DIAGNOSTICS.md) 判读原因。
+若 `r2vhjActivationBlocked` 有值，按 [DIAGNOSTICS.md](DIAGNOSTICS.md) 判读原因。
 
 ## 五、卸载与回滚
 

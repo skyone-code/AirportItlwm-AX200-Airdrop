@@ -10,7 +10,7 @@ AirDrop 走的是 AWDL：一条**只在 5 GHz 上、按 16 个时隙轮转**的�
 macOS 原生 AWDL 栈
       │  请求：setAWDL_*、master indication、数据面 tx/rx
       ▼
-ItlAWDLInterface : IO80211AWDLProtocol      ← AirportItlwm/AirportAWDLInterface.hpp
+whcvxInterface : IO80211AWDLProtocol      ← AirportItlwm/cdkas.hpp
       │  帧组装：同步前缀、动作帧、数据帧、TLV
       ▼
 include/AWDL*.hpp                            ← 纯逻辑：调度、探测、帧编解码、监管域
@@ -22,11 +22,11 @@ itlwm/hal_iwx/ItlIwx.cpp                     ← 固件队列、信道切换、�
 Intel 网卡（802.11ax，x86_64）
 ```
 
-`include/AWDL*.hpp` 是不碰内核对象的纯逻辑层（帧布局、时隙表、探测策略、TLV 解析），因此可以脱离内核单独测；`ItlAWDLInterface` 负责把这一层接进 Apple 的私有接口族。
+`include/AWDL*.hpp` 是不碰内核对象的纯逻辑层（帧布局、时隙表、探测策略、TLV 解析），因此可以脱离内核单独测；`whcvxInterface` 负责把这一层接进 Apple 的私有接口族。
 
 ## 控制面
 
-Apple 的 AWDL 栈会通过 `IO80211AWDLProtocol` 下发请求：开启/关闭、设置 peer、报能力、要一份 master indication 拷贝。`ItlAWDLInterface` 的做法是：
+Apple 的 AWDL 栈会通过 `IO80211AWDLProtocol` 下发请求：开启/关闭、设置 peer、报能力、要一份 master indication 拷贝。`whcvxInterface` 的做法是：
 
 - **只确认，不代劳**：多数请求直接回 `kIOReturnSuccess`，栈自己维持状态机。
 - **能力上报要自己说真话**：不打开 `-itlawdlcaps` 时，Apple 栈会按单流 20 MHz 处理，对端也只按这个速率发。打开后驱动按 AX211 的真实能力报两流 + VHT，TLV 7 与之一致，吞吐才上得去。
@@ -34,7 +34,7 @@ Apple 的 AWDL 栈会通过 `IO80211AWDLProtocol` 下发请求：开启/关闭�
 
 ## 数据面：为什么是"多槽"
 
-AWDL 的一轮约 16 ms，被切成 **16 个 legacy 时隙**（`include/AWDLLocalSchedule.hpp`）。单个时隙只够发一帧，如果一帧一个时隙地发，速率被时隙开销吃光。
+AWDL 的一轮约 16 ms，被切成 **16 个 legacy 时隙**（`include/ayjfw.hpp`）。单个时隙只够发一帧，如果一帧一个时隙地发，速率被时隙开销吃光。
 
 所以发送侧的做法是：**同一轮内对多个 peer、多个时隙并发提交**，每个 peer 一个固件 station 上下文、一套 Block Ack 窗口，队列非空就继续补位（逐槽 refill）。接收侧对应地把一个聚合窗口内的帧一次取回，再交给数据面。
 
@@ -52,7 +52,7 @@ AWDL 的一轮约 16 ms，被切成 **16 个 legacy 时隙**（`include/AWDLLoca
 
 ## 构建守卫
 
-AWDL 层直接子类化 Apple 私有类，并按虚表槽位调用。系统一升级，槽位一动就是内核崩溃。因此每一次启动都先做两道检查（`AirportItlwm/AWDLBuildGuard.cpp`）：
+AWDL 层直接子类化 Apple 私有类，并按虚表槽位调用。系统一升级，槽位一动就是内核崩溃。因此每一次启动都先做两道检查（`AirportItlwm/hf58f.cpp`）：
 
 1. **系统构建在白名单里**：`kern.osversion` + 内核版本串双匹配。
 2. **虚表指纹对得上**：按锚点槽位核对函数地址（Tahoe 568 槽、Sequoia 563、Sonoma 547），并检查纯虚函数位置与表尾。
@@ -65,12 +65,12 @@ AWDL 层直接子类化 Apple 私有类，并按虚表槽位调用。系统一�
 
 | 文件 | 作用 |
 | --- | --- |
-| `AirportItlwm/AirportAWDLInterface.hpp` | `ItlAWDLInterface` 的接口与状态 |
+| `AirportItlwm/cdkas.hpp` | `whcvxInterface` 的接口与状态 |
 | `AirportItlwm/AirportItlwmV2.cpp` | AWDL 接口的注册、请求应答、数据面接线 |
 | `AirportItlwm/AirportItlwmSkywalkInterface.cpp` | 能力上报、包视图 |
-| `AirportItlwm/AWDLBuildGuard.cpp` | 构建与虚表校验 |
-| `include/AWDLLocalSchedule.hpp` | 16 时隙的本地调度表 |
-| `include/AWDLPeerSchedule.hpp` | 对端时隙序列（TLV 18）解析与预测 |
-| `include/AWDLDataFrame.hpp` / `AWDLDataPayload.hpp` | 数据帧封装与 IPv6 载荷 |
-| `include/AWDLProbePolicy.hpp` | 探测帧的速率阶梯 |
+| `AirportItlwm/hf58f.cpp` | 构建与虚表校验 |
+| `include/ayjfw.hpp` | 16 时隙的本地调度表 |
+| `include/g9baj.hpp` | 对端时隙序列（TLV 18）解析与预测 |
+| `include/awkfj.hpp` / `znd5z.hpp` | 数据帧封装与 IPv6 载荷 |
+| `include/tt9wj.hpp` | 探测帧的速率阶梯 |
 | `itlwm/hal_iwx/ItlIwx.cpp` | 固件队列、信道切换、与 station 的共存 |

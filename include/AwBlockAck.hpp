@@ -4,7 +4,7 @@
 #include <stdint.h>
 #include <string.h>
 
-namespace ItlAWDL {
+namespace Aw {
 
 constexpr uint16_t kBaWindowMax = 64;
 constexpr size_t kAddbaResponseLength = 33;
@@ -339,4 +339,4 @@ struct RxSequenceTracker {
     }
 };
 
-}  // namespace ItlAWDL
+}  // namespace Aw

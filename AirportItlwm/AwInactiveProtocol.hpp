@@ -2,7 +2,7 @@
 #pragma once
 #include <IOKit/IOReturn.h>
 
-inline IOReturn itlAWDLSetInactiveState(const apple80211_awdl_sync_state *data)
+inline IOReturn awSetInactiveState(const apple80211_awdl_sync_state *data)
 {
     if (!data || data->version > APPLE80211_VERSION || data->state < 1 || data->state > 3)
         return kIOReturnBadArgument;
@@ -11,7 +11,7 @@ inline IOReturn itlAWDLSetInactiveState(const apple80211_awdl_sync_state *data)
     return data->state == 1 ? kIOReturnSuccess : kIOReturnUnsupported;
 }
 
-inline IOReturn itlAWDLGetInactiveState(apple80211_awdl_sync_state *data)
+inline IOReturn awGetInactiveState(apple80211_awdl_sync_state *data)
 {
     if (!data)
         return kIOReturnBadArgument;
@@ -25,7 +25,7 @@ inline IOReturn itlAWDLGetInactiveState(apple80211_awdl_sync_state *data)
 // behaves exactly as the inactive functions above. With accept on, it records the
 // request and reports it back so reads and writes agree. Accepting does NOT mean
 // this driver synchronizes, elects or hops: this only lets the native stack stay up.
-class ItlAWDLNativeState {
+class AwNativeNativeState {
 public:
     bool accept = false;
     IOReturn setEnabled(const apple80211_awdl_sync_enabled *data) {
@@ -45,14 +45,14 @@ public:
         return kIOReturnSuccess;
     }
     IOReturn setState(const apple80211_awdl_sync_state *data) {
-        const IOReturn result = itlAWDLSetInactiveState(data);
+        const IOReturn result = awSetInactiveState(data);
         if (result == kIOReturnBadArgument || (result == kIOReturnUnsupported && !accept))
             return result;
         state = data->state;
         return kIOReturnSuccess;
     }
     IOReturn getState(apple80211_awdl_sync_state *data) const {
-        const IOReturn result = itlAWDLGetInactiveState(data);
+        const IOReturn result = awGetInactiveState(data);
         if (result == kIOReturnSuccess)
             data->state = state;
         return result;
@@ -62,7 +62,7 @@ private:
     uint32_t state = 1;
 };
 
-class ItlAWDLFrameTemplate {
+class AwNativeFrameTemplate {
 public:
     // Conservative driver-owned storage cap, based on the legacy/reference
     // path. Tahoe's observed length/pointer fields do not prove this maximum.

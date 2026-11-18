@@ -16,7 +16,7 @@
 #include <stddef.h>
 #include <string.h>
 
-namespace ItlAWDL {
+namespace Aw {
 
 struct VerifiedBuild {
     const char *osBuild;   // kern.osversion
@@ -24,12 +24,12 @@ struct VerifiedBuild {
 };
 
 #if defined(__MAC_14_4) && __IO80211_TARGET == __MAC_14_4
-#define ITL_AWDL_GUARD_SONOMA 1
+#define AW_GUARD_SONOMA 1
 constexpr VerifiedBuild kVerifiedBuilds[] = {
     {"23J631", "xnu-10063.141.1.713.39~1/RELEASE_X86_64"},   // macOS 14.8.9
 };
 #elif defined(__MAC_15_2) && __IO80211_TARGET == __MAC_15_2
-#define ITL_AWDL_GUARD_SEQUOIA 1
+#define AW_GUARD_SEQUOIA 1
 constexpr VerifiedBuild kVerifiedBuilds[] = {
     {"24H23",  "xnu-11417.140.69.712.69~1/RELEASE_X86_64"},   // macOS 15.8
     {"24H241", "xnu-11417.140.69.713.47~2/RELEASE_X86_64"},   // macOS 15.8.3
@@ -61,7 +61,7 @@ inline BuildCheck checkBuild(const char *kernelVersion, const char *osBuild) {
     bool kernelKnown = false;
     for (const auto &b : kVerifiedBuilds)
         if (containsText(kernelVersion, b.kernel)) kernelKnown = true;
-#ifdef ITL_AWDL_GUARD_SEQUOIA
+#ifdef AW_GUARD_SEQUOIA
     if (!kernelKnown && containsText(kernelVersion, kExpectedKernelPrefix) && containsText(kernelVersion, kExpectedKernelSuffix))
         return BuildCheck::Expected;
 #endif

@@ -81,7 +81,7 @@ public:
     void observeAWDLDataFrame(const uint8_t*, size_t);
     IOReturn buildAWDLSyncProbe(mbuf_t*, uint64_t);
     IOReturn buildAWDLTransmit(mbuf_t*, const uint8_t *holdPayloadFor = nullptr, bool holdEverySize = false);
-    IOReturn buildAWDLTransmit(mbuf_t*, const struct ItlAWDLTransmitHold *holds, unsigned holdCount);
+    IOReturn buildAWDLTransmit(mbuf_t*, const struct AwTransmitHold *holds, unsigned holdCount);
     bool serviceAWDLTransmit();
     unsigned queuedAWDLTransmit();
     unsigned heldShortAWDLTransmit();

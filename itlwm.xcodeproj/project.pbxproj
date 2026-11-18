@@ -606,8 +606,8 @@
 		F89F35F62A49867F00061876 /* IO80211ControllerV2.h in Headers */ = {isa = PBXBuildFile; fileRef = F89F35F12A49867F00061876 /* IO80211ControllerV2.h */; };
 		F89F35F72A49867F00061876 /* IO80211ControllerV2.h in Headers */ = {isa = PBXBuildFile; fileRef = F89F35F12A49867F00061876 /* IO80211ControllerV2.h */; };
 		F89F35F82A49867F00061876 /* IO80211ControllerV2.h in Headers */ = {isa = PBXBuildFile; fileRef = F89F35F12A49867F00061876 /* IO80211ControllerV2.h */; };
-		A1B2C3D4E5F60718293A4B5D /* AWDLBuildGuard.cpp in Sources */ = {isa = PBXBuildFile; fileRef = A1B2C3D4E5F60718293A4B5C /* AWDLBuildGuard.cpp */; };
-		A1B2C3D4E5F60718293A4B5E /* AWDLBuildGuard.cpp in Sources */ = {isa = PBXBuildFile; fileRef = A1B2C3D4E5F60718293A4B5C /* AWDLBuildGuard.cpp */; };
+		A1B2C3D4E5F60718293A4B5D /* AwBuildGuard.cpp in Sources */ = {isa = PBXBuildFile; fileRef = A1B2C3D4E5F60718293A4B5C /* AwBuildGuard.cpp */; };
+		A1B2C3D4E5F60718293A4B5E /* AwBuildGuard.cpp in Sources */ = {isa = PBXBuildFile; fileRef = A1B2C3D4E5F60718293A4B5C /* AwBuildGuard.cpp */; };
 		F8A028222A4A7DDC00C6DE90 /* AirportItlwmV2.cpp in Sources */ = {isa = PBXBuildFile; fileRef = F8A028202A4A7DDC00C6DE90 /* AirportItlwmV2.cpp */; };
 		F8A028232A4A7DDC00C6DE90 /* AirportItlwmV2.hpp in Headers */ = {isa = PBXBuildFile; fileRef = F8A028212A4A7DDC00C6DE90 /* AirportItlwmV2.hpp */; };
 		F8A0282F2A4A7E0400C6DE90 /* AirportItlwmEthernetInterface.cpp in Sources */ = {isa = PBXBuildFile; fileRef = F8A0282D2A4A7E0400C6DE90 /* AirportItlwmEthernetInterface.cpp */; };
@@ -1199,7 +1199,7 @@
 		F89B6C2225027609000F77FF /* debug.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = debug.h; sourceTree = "<group>"; };
 		F89F35F12A49867F00061876 /* IO80211ControllerV2.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; path = IO80211ControllerV2.h; sourceTree = "<group>"; };
 		F8A028202A4A7DDC00C6DE90 /* AirportItlwmV2.cpp */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.cpp; path = AirportItlwmV2.cpp; sourceTree = "<group>"; };
-		A1B2C3D4E5F60718293A4B5C /* AWDLBuildGuard.cpp */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.cpp; path = AWDLBuildGuard.cpp; sourceTree = "<group>"; };
+		A1B2C3D4E5F60718293A4B5C /* AwBuildGuard.cpp */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.cpp; path = AwBuildGuard.cpp; sourceTree = "<group>"; };
 		F8A028212A4A7DDC00C6DE90 /* AirportItlwmV2.hpp */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.h; path = AirportItlwmV2.hpp; sourceTree = "<group>"; };
 		F8A0282D2A4A7E0400C6DE90 /* AirportItlwmEthernetInterface.cpp */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.cpp; path = AirportItlwmEthernetInterface.cpp; sourceTree = "<group>"; };
 		F8A0282E2A4A7E0400C6DE90 /* AirportItlwmEthernetInterface.hpp */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.h; path = AirportItlwmEthernetInterface.hpp; sourceTree = "<group>"; };
@@ -1671,7 +1671,7 @@
 				F89B6BBF25021C9C000F77FF /* Info.plist */,
 				F883EC1F266F43F200EA018C /* AirportItlwm-Monterey-Info.plist */,
 				F8A028202A4A7DDC00C6DE90 /* AirportItlwmV2.cpp */,
-				A1B2C3D4E5F60718293A4B5C /* AWDLBuildGuard.cpp */,
+				A1B2C3D4E5F60718293A4B5C /* AwBuildGuard.cpp */,
 				F8A028212A4A7DDC00C6DE90 /* AirportItlwmV2.hpp */,
 				F8A0282D2A4A7E0400C6DE90 /* AirportItlwmEthernetInterface.cpp */,
 				F8A0282E2A4A7E0400C6DE90 /* AirportItlwmEthernetInterface.hpp */,
@@ -3276,7 +3276,7 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
-				A1B2C3D4E5F60718293A4B5D /* AWDLBuildGuard.cpp in Sources */,
+				A1B2C3D4E5F60718293A4B5D /* AwBuildGuard.cpp in Sources */,
 				A7D000012026100700000001 /* ItlDma.cpp in Sources */,
 				F8D94CA62B9ABFE20081A3C4 /* rs.cpp in Sources */,
 				F8D94CA72B9ABFE20081A3C4 /* _mbuf.cpp in Sources */,
@@ -3359,7 +3359,7 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
-				A1B2C3D4E5F60718293A4B5E /* AWDLBuildGuard.cpp in Sources */,
+				A1B2C3D4E5F60718293A4B5E /* AwBuildGuard.cpp in Sources */,
 				A7D000012026100700000001 /* ItlDma.cpp in Sources */,
 				F8D94CA62B9ABFE20081A3C4 /* rs.cpp in Sources */,
 				F8D94CA72B9ABFE20081A3C4 /* _mbuf.cpp in Sources */,
@@ -4136,8 +4136,8 @@
 				GCC_PRECOMPILE_PREFIX_HEADER = YES;
 				GCC_PREFIX_HEADER = itlwm/PrivateSPI.pch;
 				GCC_PREPROCESSOR_DEFINITIONS = (
-					ITL_AWDL_NATIVE,
-					ITL_AWDL_GUARD_SONOMA,
+					AW_NATIVE,
+					AW_GUARD_SONOMA,
 					"$(inherited)",
 					AIRPORT,
 					"__IO80211_TARGET=__MAC_14_4",
@@ -4170,8 +4170,8 @@
 				GCC_PRECOMPILE_PREFIX_HEADER = YES;
 				GCC_PREFIX_HEADER = itlwm/PrivateSPI.pch;
 				GCC_PREPROCESSOR_DEFINITIONS = (
-					ITL_AWDL_NATIVE,
-					ITL_AWDL_GUARD_SONOMA,
+					AW_NATIVE,
+					AW_GUARD_SONOMA,
 					"__IO80211_TARGET=__MAC_14_4",
 					AIRPORT,
 					__PRIVATE_SPI__,
@@ -4204,7 +4204,7 @@
 				GCC_PRECOMPILE_PREFIX_HEADER = YES;
 				GCC_PREFIX_HEADER = itlwm/PrivateSPI.pch;
 				GCC_PREPROCESSOR_DEFINITIONS = (
-					ITL_AWDL_NATIVE,
+					AW_NATIVE,
 					AIRPORT_WCL,
 					AIRPORT_VTD,
 					"$(inherited)",
@@ -4239,8 +4239,8 @@
 				GCC_PRECOMPILE_PREFIX_HEADER = YES;
 				GCC_PREFIX_HEADER = itlwm/PrivateSPI.pch;
 				GCC_PREPROCESSOR_DEFINITIONS = (
-					ITL_AWDL_NATIVE,
-					ITL_AWDL_GUARD_SEQUOIA,
+					AW_NATIVE,
+					AW_GUARD_SEQUOIA,
 					AIRPORT_WCL,
 					AIRPORT_VTD,
 					"$(inherited)",
@@ -4275,7 +4275,7 @@
 				GCC_PRECOMPILE_PREFIX_HEADER = YES;
 				GCC_PREFIX_HEADER = itlwm/PrivateSPI.pch;
 				GCC_PREPROCESSOR_DEFINITIONS = (
-					ITL_AWDL_NATIVE,
+					AW_NATIVE,
 					AIRPORT_WCL,
 					AIRPORT_VTD,
 					"__IO80211_TARGET=__MAC_26_0",
@@ -4310,8 +4310,8 @@
 				GCC_PRECOMPILE_PREFIX_HEADER = YES;
 				GCC_PREFIX_HEADER = itlwm/PrivateSPI.pch;
 				GCC_PREPROCESSOR_DEFINITIONS = (
-					ITL_AWDL_NATIVE,
-					ITL_AWDL_GUARD_SEQUOIA,
+					AW_NATIVE,
+					AW_GUARD_SEQUOIA,
 					AIRPORT_WCL,
 					AIRPORT_VTD,
 					"__IO80211_TARGET=__MAC_15_2",

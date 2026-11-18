@@ -3,7 +3,7 @@
 // sending to it, so frames wait instead of failing, and the firmware's rate control only sees the
 // time the peer is there.
 //
-// Timing, as our own sync TLV encodes it (AWDLLocalSchedule.hpp, after seemoo-lab/owl): the AW
+// Timing, as our own sync TLV encodes it (AwLocalSchedule.hpp, after seemoo-lab/owl): the AW
 // counter (sync TLV bytes 29 and 30) goes up once per AW of awPeriod TU, and the down counter
 // (bytes 1 and 2) is the TU left in the current extended AW of 4 AWs. Each of the 16 entries in
 // the peer's channel sequence (TLV 18) covers one extended AW. Which entry is current is
@@ -13,7 +13,7 @@
 #include <stdint.h>
 #include <string.h>
 
-namespace ItlAWDL {
+namespace Aw {
 
 constexpr unsigned kPeerSeqEntries = 16;
 constexpr uint64_t kPeerScheduleStaleUS = 2000000;  // No sync heard for this long: don't pause.
@@ -355,4 +355,4 @@ struct PeerBulkState {
     }
 };
 
-}  // namespace ItlAWDL
+}  // namespace Aw

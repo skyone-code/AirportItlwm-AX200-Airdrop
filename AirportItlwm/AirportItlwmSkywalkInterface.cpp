@@ -7,8 +7,8 @@
 //
 #include "AirportItlwmV2.hpp"
 #include "AirportItlwmSkywalkInterface.hpp"
-#if defined(ITL_AWDL_NATIVE)
-#include "AirportAWDLInterface.hpp"
+#if defined(AW_NATIVE)
+#include "AwInterface.hpp"
 #endif
 #include <sys/CTimeout.hpp>
 #include <libkern/c++/OSMetaClass.h>
@@ -320,18 +320,18 @@ setVIRTUAL_IF_CREATE(apple80211_virt_if_create_data *data)
     if (!instance)
         return kIOReturnNotReady;
 
-    publish(instance, "ItlwmAWDLCreateRequests", __sync_add_and_fetch(&instance->awdlCreateRequests, 1));
+    publish(instance, "AwIfCreateRequests", __sync_add_and_fetch(&instance->awdlCreateRequests, 1));
     if (!data) {
-        publish(instance, "ItlwmAWDLCreateResult", kIOReturnBadArgument);
+        publish(instance, "AwIfCreateResult", kIOReturnBadArgument);
         return kIOReturnBadArgument;
     }
-    publish(instance, "ItlwmAWDLCreateRole", data->role);
+    publish(instance, "AwIfCreateRole", data->role);
     if (!instance->awdlInterfaceTest || data->role != APPLE80211_VIF_AWDL) {
-        publish(instance, "ItlwmAWDLCreateResult", kIOReturnUnsupported);
+        publish(instance, "AwIfCreateResult", kIOReturnUnsupported);
         return kIOReturnUnsupported;
     }
     if (instance->fAWDLInterface) {
-        publish(instance, "ItlwmAWDLCreateResult", kIOReturnSuccess);
+        publish(instance, "AwIfCreateResult", kIOReturnSuccess);
         return kIOReturnSuccess;
     }
 
@@ -339,9 +339,9 @@ setVIRTUAL_IF_CREATE(apple80211_virt_if_create_data *data)
     memcpy(address.octet, data->mac, sizeof(address.octet));
     const bool attached = instance->attachVirtualInterface(&instance->fAWDLInterface, &address, data->role, false);
     IOReturn result = attached ? kIOReturnSuccess : kIOReturnError;
-#if defined(ITL_AWDL_NATIVE)
+#if defined(AW_NATIVE)
     if (attached) {
-        result = static_cast<ItlAWDLInterface *>(instance->fAWDLInterface)->initializeNetwork(
+        result = static_cast<AwNativeInterface *>(instance->fAWDLInterface)->initializeNetwork(
             instance, instance->getWorkQueue(), address);
         if (result != kIOReturnSuccess) {
             // initializeNetwork unwinds an unpublished object. Native virtual
@@ -353,7 +353,7 @@ setVIRTUAL_IF_CREATE(apple80211_virt_if_create_data *data)
         }
     }
 #endif
-    publish(instance, "ItlwmAWDLCreateResult", result);
+    publish(instance, "AwIfCreateResult", result);
     return result;
 }
 
@@ -559,7 +559,7 @@ getMCS_INDEX_SET(struct apple80211_mcs_index_set_data *ad)
     return 6;
 }
 
-extern bool itlAWDLBuildAllowed();
+extern bool awBuildAllowed();
 // -itlawdlcaps: answer the native stack's HT and VHT capability requests. Without them it
 // assumes one HT stream and no VHT, and advertises that to AWDL peers in TLV 7 and leaves out
 // TLV 17, so a peer sends to us at 20 MHz on one stream. The values are the AX211's own.
@@ -568,7 +568,7 @@ static bool itlAWDLAdvertiseCaps()
     static int cached = -1;
     if (cached < 0) {
         int dummy = 0;
-        cached = itlAWDLBuildAllowed() && !PE_parse_boot_argn("-itlawdlnocaps", &dummy, sizeof(dummy)) ? 1 : 0;
+        cached = awBuildAllowed() && !PE_parse_boot_argn("-itlawdlnocaps", &dummy, sizeof(dummy)) ? 1 : 0;
     }
     return cached == 1;
 }
@@ -1090,6 +1090,9 @@ setSCAN_REQ(struct apple80211_scan_data *sd)
 #endif
     if (!sd)
         return kIOReturnBadArgument;
+    XYLog("SCAN_REQ: type=%u chCount=%u ssidLen=%u state=%d wrapping=%d\n",
+          sd->scan_type, sd->num_channels, sd->ssid_len, ic->ic_state,
+          fScanResultWrapping ? 1 : 0);
     if (fScanResultWrapping)
         return 22;
     if (ic->ic_state <= IEEE80211_S_INIT)

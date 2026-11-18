@@ -3,7 +3,7 @@
 #pragma once
 #include <IOKit/IOReturn.h>
 
-template <typename T> class ItlAWDLRequestedValue {
+template <typename T> class AwNativeRequestedValue {
 public:
     IOReturn set(const T *request) {
         // Native peer-manager internal requests are zero-initialized and do

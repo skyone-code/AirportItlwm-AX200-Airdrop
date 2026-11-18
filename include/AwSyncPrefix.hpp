@@ -1,9 +1,9 @@
 // Fixed synchronization prefix encoder, not a clock or channel scheduler.
-// Wire offsets follow the reference documented in AWDLFrameParser.hpp.
+// Wire offsets follow the reference documented in AwFrameParser.hpp.
 #pragma once
-#include <AWDLFrameBuilder.hpp>
+#include <AwFrameBuilder.hpp>
 
-namespace ItlAWDL {
+namespace Aw {
 struct SyncPrefix {
     uint8_t nextChannel, masterChannel, guardTime;
     uint16_t txDownCounter, awPeriod, afPeriod, flags;
@@ -36,4 +36,4 @@ inline BuildResult buildSyncPrefix(const SyncPrefix &p, uint8_t *output,
     *written = 27;
     return BuildResult::Ready;
 }
-} // namespace ItlAWDL
+} // namespace Aw
