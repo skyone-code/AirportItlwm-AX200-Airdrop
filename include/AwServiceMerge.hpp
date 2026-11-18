@@ -9,7 +9,7 @@
 #include <stdint.h>
 #include <string.h>
 
-namespace ItlAWDL {
+namespace Aw {
 
 constexpr size_t kActionTlvStart = 40;
 // A merged frame stays at or under this, well within the native stack's buffers.
@@ -120,4 +120,4 @@ struct PeerServiceCache {
     }
 };
 
-}  // namespace ItlAWDL
+}  // namespace Aw

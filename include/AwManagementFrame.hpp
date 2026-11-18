@@ -1,8 +1,8 @@
 #pragma once
-#include <AWDLFrameParser.hpp>
+#include <AwFrameParser.hpp>
 #include <IOKit/IOReturn.h>
 
-namespace ItlAWDL {
+namespace Aw {
 // Native actionFrameInput accepts at most 72 bytes of auxiliary metadata.
 // Peer address and apple80211_channel are the known prefix; other fields zero.
 struct ManagementMetadata {
@@ -53,4 +53,4 @@ IOReturn copyManagementFrame(Backend &backend, const uint8_t *frame, size_t leng
     backend.submit(buffer, &metadata);
     return kIOReturnSuccess; // Submitted, not proof that a peer was accepted.
 }
-} // namespace ItlAWDL
+} // namespace Aw

@@ -1,21 +1,21 @@
 // Experimental native AWDL interface. No AWDL radio data path is implemented.
 #pragma once
-#include "ItlAWDLTransmitHold.hpp"
+#include "AwTransmitHold.hpp"
 #include <Airport/IO80211AWDLProtocol.h>
 #include <Airport/IOSkywalkQueueFactories.h>
-#include "AWDLRequestedValue.hpp"
-#include "AWDLInactiveProtocol.hpp"
+#include "AwRequestedValue.hpp"
+#include "AwInactiveProtocol.hpp"
 #include <IOKit/IOLocks.h>
 
-class ItlAWDLInterface : public IO80211AWDLProtocol {
-    OSDeclareDefaultStructors(ItlAWDLInterface)
+class AwNativeInterface : public IO80211AWDLProtocol {
+    OSDeclareDefaultStructors(AwNativeInterface)
 public:
     struct FrameConfiguration {
         apple80211_awdl_sync_params parameters;
         bool hasRequestedTiming;
         uint8_t address[6];
         size_t templateLength;
-        uint8_t staticTLVs[ItlAWDLFrameTemplate::capacity];
+        uint8_t staticTLVs[AwNativeFrameTemplate::capacity];
     };
     // Caller retains this interface and holds the shared controller gate.
     // The copy owns every byte and does not activate the native transport.
@@ -29,7 +29,7 @@ public:
     bool hasMasterIndication() const { return masterIndicationLength != 0; }
     // Under the shared gate. Converts the oldest queued frame into a caller-owned buffer.
     bool popTransmit(uint8_t *, size_t, size_t *, const uint8_t *holdPayloadFor, bool holdEverySize = false);
-    bool popTransmit(uint8_t *, size_t, size_t *, const ItlAWDLTransmitHold *holds, unsigned holdCount);
+    bool popTransmit(uint8_t *, size_t, size_t *, const AwTransmitHold *holds, unsigned holdCount);
     // Frames macOS has queued that the driver hasn't taken yet.
     unsigned queuedTransmit() const { return transmitQueued; }
     unsigned heldShortTransmit() const { return transmitHeldShort; }
@@ -122,7 +122,7 @@ private:
     // These are desired host settings, not an active radio schedule. Native
     // synchronization/state/frame operations remain unsupported.
     IOLock *configurationLock = nullptr;
-    ItlAWDLFrameTemplate frameTemplate;
+    AwNativeFrameTemplate frameTemplate;
     uint8_t localFrameAddress[6] = {};
     bool dataCopyProbeEnabled = false;
     unsigned dataCopyAttempts = 0, dataCopySuccess = 0;
@@ -161,7 +161,7 @@ private:
     // Non-head-of-line blocking: a frame for a held peer moves to its side queue (see
     // transmitHoldQueues) instead of pinning the FIFO head, so the pump keeps serving
     // every other peer. Side queues drain, oldest first, before the ring is scanned.
-    bool popHeldTransmit(const ItlAWDLTransmitHold *holds, unsigned holdCount,
+    bool popHeldTransmit(const AwTransmitHold *holds, unsigned holdCount,
                          uint8_t *output, size_t available, size_t *written);
     TransmitHoldQueue *transmitHoldQueueFor(const uint8_t *mac);
     IOSkywalkPacket *transmitDone[transmitFrameCapacity] = {};
@@ -170,7 +170,7 @@ private:
     uint32_t transmitDepthBins[9] = {};
     uint16_t transmitSequence = 0;
     bool dataTransmitEnabled = false;
-    ItlAWDLNativeState nativeState;
+    AwNativeNativeState nativeState;
     unsigned oobRequests = 0;
     bool oobSampled = false, debugFlagsSet = false, debugFlagsWanted = false;
     IOReturn noteOobRequest(const apple80211_awdl_oob_request *, const char *);
@@ -183,17 +183,17 @@ private:
     uint16_t masterIndicationSampledLength = 0;
     unsigned masterIndicationUpdates = 0, masterIndicationRejected = 0;
     uint32_t afTxModeValue = 0;
-    ItlAWDLRequestedValue<apple80211_awdl_bssid> requestedBSSID;
-    ItlAWDLRequestedValue<apple80211_awdl_sync_params> requested_AWDL_SYNC_PARAMS;
-    ItlAWDLRequestedValue<apple80211_awdl_extension_state_machine_parameter> requested_AWDL_EXTENSION_STATE_MACHINE_PARAMETERS;
-    ItlAWDLRequestedValue<apple80211_awdl_election_id> requested_AWDL_ELECTION_ID;
-    ItlAWDLRequestedValue<apple80211_awdl_election_metric> requested_AWDL_ELECTION_METRIC;
-    ItlAWDLRequestedValue<apple80211_awdl_sync_channel_sequence> requested_AWDL_SYNCHRONIZATION_CHANNEL_SEQUENCE;
-    ItlAWDLRequestedValue<apple80211_awdl_master_channel> requested_AWDL_MASTER_CHANNEL;
-    ItlAWDLRequestedValue<apple80211_awdl_secondary_master_channel> requested_AWDL_SECONDARY_MASTER_CHANNEL;
-    ItlAWDLRequestedValue<apple80211_awdl_election_rssi_thresholds> requested_AWDL_ELECTION_RSSI_THRESHOLDS;
-    ItlAWDLRequestedValue<apple80211_awdl_presence_mode> requested_AWDL_PRESENCE_MODE;
-    template <typename T> IOReturn storeRequested(ItlAWDLRequestedValue<T> &slot,
+    AwNativeRequestedValue<apple80211_awdl_bssid> requestedBSSID;
+    AwNativeRequestedValue<apple80211_awdl_sync_params> requested_AWDL_SYNC_PARAMS;
+    AwNativeRequestedValue<apple80211_awdl_extension_state_machine_parameter> requested_AWDL_EXTENSION_STATE_MACHINE_PARAMETERS;
+    AwNativeRequestedValue<apple80211_awdl_election_id> requested_AWDL_ELECTION_ID;
+    AwNativeRequestedValue<apple80211_awdl_election_metric> requested_AWDL_ELECTION_METRIC;
+    AwNativeRequestedValue<apple80211_awdl_sync_channel_sequence> requested_AWDL_SYNCHRONIZATION_CHANNEL_SEQUENCE;
+    AwNativeRequestedValue<apple80211_awdl_master_channel> requested_AWDL_MASTER_CHANNEL;
+    AwNativeRequestedValue<apple80211_awdl_secondary_master_channel> requested_AWDL_SECONDARY_MASTER_CHANNEL;
+    AwNativeRequestedValue<apple80211_awdl_election_rssi_thresholds> requested_AWDL_ELECTION_RSSI_THRESHOLDS;
+    AwNativeRequestedValue<apple80211_awdl_presence_mode> requested_AWDL_PRESENCE_MODE;
+    template <typename T> IOReturn storeRequested(AwNativeRequestedValue<T> &slot,
                                                  const T *data, const char *name) {
         if (!configurationLock)
             return kIOReturnNotReady;
@@ -201,10 +201,10 @@ private:
         const IOReturn result = slot.set(data);
         IOLockUnlock(configurationLock);
         if (result == kIOReturnSuccess)
-            setProperty("ItlwmAWDLLastStoredRequest", name);
+            setProperty("AwIfLastStoredRequest", name);
         return result;
     }
-    template <typename T> IOReturn readRequested(const ItlAWDLRequestedValue<T> &slot,
+    template <typename T> IOReturn readRequested(const AwNativeRequestedValue<T> &slot,
                                                 T *data) {
         if (!configurationLock)
             return kIOReturnNotReady;
@@ -225,7 +225,7 @@ private:
     bool registrationAttempted = false;
     uint32_t managementSubmissions = 0;
     IOReturn unsupported(const char *operation) {
-        setProperty("ItlwmAWDLLastUnsupported", operation);
+        setProperty("AwIfLastUnsupported", operation);
         return kIOReturnUnsupported;
     }
 };

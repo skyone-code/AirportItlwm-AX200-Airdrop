@@ -2,8 +2,8 @@
 // Nothing here admits a peer or delivers data. The counters answer one question
 // that firmware TX status cannot: did anyone on the air react to our frames?
 #pragma once
-#include <AWDLDataFrame.hpp>
-namespace ItlAWDL {
+#include <AwDataFrame.hpp>
+namespace Aw {
 struct ObservedCounts {
     uint32_t selfEchoes;      // Our own source address came back (not a peer).
     uint32_t actionToUs;      // A peer's action frame had us as receiver.

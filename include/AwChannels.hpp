@@ -4,7 +4,7 @@
 #pragma once
 #include <stdint.h>
 
-namespace ItlAWDL {
+namespace Aw {
 
 inline bool fixedScheduleChannel(uint8_t channel) {
     if (channel >= 1 && channel <= 13) return true;

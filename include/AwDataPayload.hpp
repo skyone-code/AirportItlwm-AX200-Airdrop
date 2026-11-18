@@ -1,8 +1,8 @@
 // Independent LLC/AWDL/IPv6 payload codec. Wire layout cross-checked against
 // seemoo-lab/owl src/frame.h, src/tx.c and src/rx.c. No radio/queue ownership.
 #pragma once
-#include <AWDLFrameBuilder.hpp>
-namespace ItlAWDL {
+#include <AwFrameBuilder.hpp>
+namespace Aw {
 struct IPv6PayloadView { const uint8_t *bytes; size_t length; uint16_t sequence; };
 inline bool validIPv6Payload(const uint8_t *p, size_t n) {
     // Initial transport supports a 1500-byte IPv6 MTU and no jumbograms.

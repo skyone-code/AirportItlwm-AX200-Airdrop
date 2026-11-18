@@ -113,16 +113,16 @@
 #include <linux/types.h>
 #include <linux/kernel.h>
 #include <FwData.h>
-#include <AWDLFrameParser.hpp>
-#include <AWDLFrameBuilder.hpp>
-#include <AWDLProbePolicy.hpp>
-#include <AWDLObservation.hpp>
-#include <AWDLPeerProbe.hpp>
-#include <AWDLPeerSchedule.hpp>
-#include <AWDLDataFrame.hpp>
-#include <AWDLRegulatory.hpp>
-#include <AWDLBlockAck.hpp>
-#include <AWDLServiceMerge.hpp>
+#include <AwFrameParser.hpp>
+#include <AwFrameBuilder.hpp>
+#include <AwProbePolicy.hpp>
+#include <AwObservation.hpp>
+#include <AwPeerProbe.hpp>
+#include <AwPeerSchedule.hpp>
+#include <AwDataFrame.hpp>
+#include <AwRegulatory.hpp>
+#include <AwBlockAck.hpp>
+#include <AwServiceMerge.hpp>
 
 // The firmware station for the AWDL peer, used by -itlawdlba.
 constexpr uint8_t kAwdlBaStationId = 3;
@@ -140,8 +140,8 @@ struct AwdlCoexBaSlot {
     int failedGen = -1, gen = -1;
     uint32_t peerEpoch = 0, peerWidth = 0;
     int txQueue = -1, txResetting = -1;
-    ItlAWDL::PendingAddbaRequests requestsPending;
-    uint8_t answer[ItlAWDL::kAddbaResponseLength] = {};
+    Aw::PendingAddbaRequests requestsPending;
+    uint8_t answer[Aw::kAddbaResponseLength] = {};
     size_t answerLength = 0;
     uint8_t answerTid = 0;
     uint64_t answerRetryUS = 0;
@@ -153,9 +153,9 @@ struct AwdlCoexBaSlot {
     uint32_t txAsks = 0, destPayloads = 0;
     uint8_t txDest[6] = {}; // Last payload destination seen for slots >= 1 (slot 0 uses awdlCoexTxDest).
     uint64_t txLastAskUS = 0, txRestUntilUS = 0, txLastAggUS = 0, txLastNotifUS = 0;
-    ItlAWDL::BaTxBulkState txBulk;
-    ItlAWDL::PeerPauseState peerPause;
-    ItlAWDL::PeerBulkState peerBulk;
+    Aw::BaTxBulkState txBulk;
+    Aw::PeerPauseState peerPause;
+    Aw::PeerBulkState peerBulk;
     uint32_t status = 0, txQueueResult = 0, txAggEnableStatus = 0;
     uint32_t sessions = 0, answers = 0, answerErrors = 0;
     // Every Block Ack action frame received from this slot's peer, counted before any parsing, so a
@@ -290,7 +290,7 @@ static uint32_t awdlCoexCountryLastStatus, awdlCoexCountryAnswerSeconds;
 static uint16_t awdlCoexCountryNotice, awdlCoexCountryAnswered;
 static uint8_t awdlCoexCountrySource, awdlCoexCountrySourceAnswered;
 static bool awdlCoexCountryPending, awdlCoexCountryLearned;
-// Bits 0-3: a beacon hint on 149, 153, 157, 161; bit 4: on 6 (ITLAWDLCoexBeaconHints).
+// Bits 0-3: a beacon hint on 149, 153, 157, 161; bit 4: on 6 (AwCoexBeaconHints).
 static uint32_t awdlCoexBeaconHints;
 static uint64_t awdlCoexLastMoveUS;
 // v48: a user-driven scan (an airportd WCL request or a pending join SSID) parks the multi
@@ -340,7 +340,7 @@ static const char *awdlCoexQueueClash = "none";
 static uint32_t awdlCoexQueueFwqid, awdlCoexTidQidsCleared;
 static int awdlCoexQueueAssigned = -1;
 static uint32_t awdlCoexQueueWritePointer = 0xffffffffU;
-#include <AWDLTxBurst.hpp>
+#include <AwTxBurst.hpp>
 static void awdlLog(const char *, ...);
 static void awdlTxLog(const char *, ...);
 static void awdlStopTimers();
@@ -5787,16 +5787,16 @@ out:
 // frame with BSSID 00:25:00:ff:94:73: category 0x7f, OUI 00:17:f2, type 8,
 // version, subtype (0 PSF, 3 MIF), reserved, then phy_tx_time and
 // target_tx_time, little endian, in microseconds of the sender's clock.
-#if defined(ITL_AWDL_NATIVE)
-extern bool itlAWDLBuildAllowed();
+#if defined(AW_NATIVE)
+extern bool awBuildAllowed();
 extern IOReturn itlAWDLReceiveAction(IOEthernetController*, mbuf_t, size_t, uint32_t, int32_t);
 extern void itlAWDLObserveData(IOEthernetController*, const uint8_t*, size_t);
 extern IOReturn itlAWDLBuildSyncProbe(IOEthernetController*, mbuf_t*, uint64_t);
-#include "ItlAWDLTransmitHold.hpp"
+#include "AwTransmitHold.hpp"
 extern IOReturn itlAWDLBuildTransmit(IOEthernetController*, mbuf_t*);
 extern IOReturn itlAWDLBuildTransmit(IOEthernetController*, mbuf_t*, const uint8_t*);
 extern IOReturn itlAWDLBuildTransmit(IOEthernetController*, mbuf_t*, const uint8_t*, bool);
-extern IOReturn itlAWDLBuildTransmit(IOEthernetController*, mbuf_t*, const ItlAWDLTransmitHold*, unsigned);
+extern IOReturn itlAWDLBuildTransmit(IOEthernetController*, mbuf_t*, const AwTransmitHold*, unsigned);
 extern unsigned itlAWDLTransmitHeldShort(IOEthernetController*);
 extern bool itlAWDLServiceTransmit(IOEthernetController*);
 extern unsigned itlAWDLTransmitQueued(IOEthernetController*);
@@ -5804,7 +5804,7 @@ extern unsigned itlAWDLTransmitQueued(IOEthernetController*);
 // No AirDrop interface on this macOS target: nothing is ever queued for it.
 static inline unsigned itlAWDLTransmitQueued(IOEthernetController*) { return 0; }
 #endif
-extern bool itlAWDLBuildAllowed();
+extern bool awBuildAllowed();
 static bool awdlRx;
 static bool awdlQueueProbe;
 static bool awdlQueueProbeAttempted;
@@ -5913,7 +5913,7 @@ static void awdlTxLog(const char *fmt, ...)
     va_end(ap);
 }
 // Session events only: Block Ack sessions, the filter, the peer's service sets, gaps in hearing it.
-// Rare enough that one ring covers a whole test session (ITLAWDLSessionEvents).
+// Rare enough that one ring covers a whole test session (AwSessionEvents).
 static char awdlSessLines[256][140];
 static volatile uint32_t awdlSessNext;
 static void awdlSessLog(const char *fmt, ...) __printflike(1, 2);
@@ -5985,19 +5985,19 @@ static bool awdlSyncTrain;
 static bool awdlFastProbe;
 static bool awdlPeerTrain;
 static bool awdlAckProbe;
-static ItlAWDL::AckProbe awdlAckPending = ItlAWDL::AckProbe::None;
-static ItlAWDL::AckCounts awdlAcks;
+static Aw::AckProbe awdlAckPending = Aw::AckProbe::None;
+static Aw::AckCounts awdlAcks;
 static uint8_t awdlLastPeer[6];
 static int awdlLastPeerRssi;
 static uint8_t awdlAckTarget[6];
 static int awdlAckTargetRssi;
-static ItlAWDL::PeerProbe awdlPeerProbes[8];
+static Aw::PeerProbe awdlPeerProbes[8];
 static unsigned awdlPeerProbeCount;
-static ItlAWDL::AirCounts awdlAir;
+static Aw::AirCounts awdlAir;
 static uint32_t awdlPeerTLVs[256];
 static uint64_t awdlUptimeUS();
 // When TLV 2, services, changes in our frames and in the peer's, to time a lookup.
-static ItlAWDL::ServiceSnapshotLog awdlServiceLog;
+static Aw::ServiceSnapshotLog awdlServiceLog;
 // -itlawdlmcastuc: each group data frame also goes to the last peer heard, as unicast, so it gets an
 // ACK and retries. The phone answers few of our multicast mDNS queries, though it accepts unicast.
 static bool awdlMcastUnicast, awdlNoPeerPsf, awdlServiceMerge;
@@ -6014,7 +6014,7 @@ static bool awdlTx80;
 static uint8_t awdlTx80Peer[6];
 static uint64_t awdlTx80PeerUS;
 static int awdlTx80PeerGeneration;
-static ItlAWDL::BaTxBulkState awdlTx80Bulk;
+static Aw::BaTxBulkState awdlTx80Bulk;
 static uint32_t awdlTx80Requested, awdlTx80Completed, awdlTx80Reported, awdlTx80Acked;
 static unsigned awdlTx80ConsecutiveMisses;
 unsigned itlAWDLChannelClass()
@@ -6042,7 +6042,7 @@ static bool awdlWide80Applies(struct ieee80211com *ic, struct ieee80211_channel 
     }
     return true;
 }
-static ItlAWDL::PeerServiceCache awdlServiceCache;
+static Aw::PeerServiceCache awdlServiceCache;
 static uint32_t awdlCoexServiceCacheToken;
 static uint32_t awdlServiceMergedFrames, awdlServiceMergedRecords, awdlServiceMergeRefused, awdlServiceMergeLastError;
 static uint32_t awdlPeerPsfKept;
@@ -6060,19 +6060,19 @@ static bool awdlDataTx;
 // What the frame in flight is: 0 not data, 1 multicast, 2 unicast. Unicast status
 // shows whether the peer's radio ACKed it.
 static unsigned awdlDataInFlight;
-static ItlAWDL::DataRateState awdlDataRate;
+static Aw::DataRateState awdlDataRate;
 static unsigned awdlDataStepInFlight;
 // Per rate step: sent, acknowledged, failed, total retries.
-static uint32_t awdlRateResults[ItlAWDL::kDataRateSteps][4];
+static uint32_t awdlRateResults[Aw::kDataRateSteps][4];
 static uint32_t awdlTxKicks;
-static ItlAWDL::ResendState awdlResend;
+static Aw::ResendState awdlResend;
 static uint8_t awdlResendFrame[1600];
 static size_t awdlResendLength;
 static uint32_t awdlResendSent, awdlResendRecovered, awdlResendGaveUp;
 static bool awdlKickTransmit;
 static bool awdlDataEverActive;
 static uint64_t awdlLastDataUS;
-static ItlAWDL::RxRateEntry awdlRxRates[16];
+static Aw::RxRateEntry awdlRxRates[16];
 static uint32_t awdlRxRatesOverflow;
 static uint64_t awdlLastSyncUS;
 static uint32_t awdlDataSent[2], awdlDataOK[2], awdlDataFailed[2], awdlDataLastFailure;
@@ -6080,7 +6080,7 @@ static uint32_t awdlDataSent[2], awdlDataOK[2], awdlDataFailed[2], awdlDataLastF
 // 19 minutes. Sync frames are still gated on a peer being audible.
 static unsigned awdlTrainLimit()
 {
-    return awdlDataTx ? 0x40000000U : ItlAWDL::probeLimit(awdlFastProbe, awdlPeerTrain);
+    return awdlDataTx ? 0x40000000U : Aw::probeLimit(awdlFastProbe, awdlPeerTrain);
 }
 static uint8_t awdlLearnedPeer[6];
 static uint8_t awdlLearnedPeerIP[16];
@@ -6347,7 +6347,7 @@ static uint32_t awdlCoexRejectReasons[4];
 static bool awdlCoexBaFilterOff;
 // Stage-4 per-peer state lives in awdlCoexBaSlots above; slot 0 is aliased to the historical names.
 static uint32_t awdlCoexBaRequests, awdlCoexBaOtherPeer, awdlCoexBaFilterChanges;
-static ItlAWDL::BaFilterState awdlCoexBaFilter;
+static Aw::BaFilterState awdlCoexBaFilter;
 // What the phone's data looks like: retries, and modulation (index = rate_n_flags mod type), 80 MHz count.
 static uint32_t awdlCoexDataRxRetry, awdlCoexRxModulation[8], awdlCoexRxWide80;
 // Unicast data rate for our frames: 0 legacy 24 Mbit/s, then HT MCS 4, 5, 7 (20 MHz, one stream). Steps
@@ -6604,7 +6604,7 @@ constexpr uint64_t kAwdlGateAwWindowUS = 4000, kAwdlGateAwakeUS = 100000;
 // iface161 (on unless -itlawdlcoexcalwait): the coex schedule assumes offset 0 until refuted
 // (PeerSchedule::assumeZero), so pauses and the gate work from the first sync frame after each anchor.
 static bool awdlCoexAssumeZero = true;
-static ItlAWDL::BaTrace awdlCoexBaTrace;
+static Aw::BaTrace awdlCoexBaTrace;
 static uint32_t awdlCoexBaTracePublished;
 // Sample from the coex timer so silence between Block Acks is represented too.
 // The most recent completion snapshot is valid only for the same queue owner.
@@ -6631,22 +6631,22 @@ struct CoexBaTimeline {
 static CoexBaTimeline awdlCoexBaTimeline;
 static uint64_t awdlCoexBaTimelineLastUS, awdlCoexBaTimelinePublishedUS;
 // The peer whose schedule is tracked, and how sync frames were paced.
-static ItlAWDL::PeerSchedule awdlCoexPeerSchedule;
+static Aw::PeerSchedule awdlCoexPeerSchedule;
 static uint8_t awdlCoexSchedPeer[6];
 static uint32_t awdlCoexSchedToken;
 // Probe, feeding no send decision: each peer's availability learned on its own, to find out whether a second
 // peer's window can be tracked at all before per-peer scheduling is wired into the gate, pause and ask paths.
 constexpr unsigned kAwdlCoexProbePeers = 4;
-static ItlAWDL::PeerSchedule awdlCoexProbeSched[kAwdlCoexProbePeers];
+static Aw::PeerSchedule awdlCoexProbeSched[kAwdlCoexProbePeers];
 static uint8_t awdlCoexProbePeer[kAwdlCoexProbePeers][6];
 static uint32_t awdlCoexProbeFrames[kAwdlCoexProbePeers], awdlCoexProbeNoted[kAwdlCoexProbePeers];
 static unsigned awdlCoexProbeUsed;
 // One peer's own learned windows, for a slot past the first. Each peer wakes on its own schedule, so an ask
 // sent on another peer's windows is sent while this one is asleep. Null until that peer has been learned.
-static const ItlAWDL::PeerSchedule *awdlCoexProbeScheduleFor(const uint8_t *peer)
+static const Aw::PeerSchedule *awdlCoexProbeScheduleFor(const uint8_t *peer)
 {
     for (unsigned k = 0; k < awdlCoexProbeUsed; ++k) {
-        if (!ItlAWDL::sameAddress(peer, awdlCoexProbePeer[k]))
+        if (!Aw::sameAddress(peer, awdlCoexProbePeer[k]))
             continue;
         auto &ps = awdlCoexProbeSched[k];
         // Borrow the phase from the peer that did calibrate, never its channels: both sequences ride the same
@@ -6680,7 +6680,7 @@ static bool awdlCoexScheduleCurrent()
 {
     return awdlCoexAdded && awdlCoexSchedToken == awdlCoexToken &&
         awdlCoexPeerSchedule.ourChannel == awdlCoexChannel &&
-        (!awdlCoexBaPeerAdded || ItlAWDL::sameAddress(awdlCoexSchedPeer, awdlCoexBaPeer));
+        (!awdlCoexBaPeerAdded || Aw::sameAddress(awdlCoexSchedPeer, awdlCoexBaPeer));
 }
 static uint32_t awdlCoexPeerSyncFrames, awdlCoexAwSyncFrames, awdlCoexIdleSyncFrames;
 // Last time any frame for the listener arrived. A peer that is talking is a session in progress: a sweep that
@@ -6743,135 +6743,135 @@ static bool awdlCoexPeerKnown(const uint8_t *addr, uint64_t nowUS, bool refresh 
 static void awdlCoexPublish()
 {
     auto *root = IORegistryEntry::getRegistryRoot();
-    root->setProperty("ITLAWDLCoexAdded", awdlCoexAdded);
-    root->setProperty("ITLAWDLCoexAdds", awdlCoexAdds, 32);
-    root->setProperty("ITLAWDLCoexRemoves", awdlCoexRemoves, 32);
-    root->setProperty("ITLAWDLCoexAddsAfterRemove", awdlCoexAddsAfterRemove, 32);
-    root->setProperty("ITLAWDLCoexAddsAfterRestart", awdlCoexAddsAfterRestart, 32);
-    root->setProperty("ITLAWDLCoexFirmwareGeneration", uint32_t(awdlCoexGeneration), 32);
-    root->setProperty("ITLAWDLCoexCountryUnusableAnswers", awdlCoexCountryUnusableAnswers, 32);
-    root->setProperty("ITLAWDLCoexHintClears", awdlCoexHintClears, 32);
-    root->setProperty("ITLAWDLCoexBaAsksShared", awdlCoexBaAsksShared, 32);
-    root->setProperty("ITLAWDLCoexBaAskShared", awdlCoexBaAskShared);
-    root->setProperty("ITLAWDLCoexBaSharedOff", awdlCoexNoSharedBa);
-    root->setProperty("ITLAWDLCoexBaPeerWidth", awdlCoexBaPeerWidth, 32);
+    root->setProperty("AwCoexAdded", awdlCoexAdded);
+    root->setProperty("AwCoexAdds", awdlCoexAdds, 32);
+    root->setProperty("AwCoexRemoves", awdlCoexRemoves, 32);
+    root->setProperty("AwCoexAddsAfterRemove", awdlCoexAddsAfterRemove, 32);
+    root->setProperty("AwCoexAddsAfterRestart", awdlCoexAddsAfterRestart, 32);
+    root->setProperty("AwCoexFirmwareGeneration", uint32_t(awdlCoexGeneration), 32);
+    root->setProperty("AwCoexCountryUnusableAnswers", awdlCoexCountryUnusableAnswers, 32);
+    root->setProperty("AwCoexHintClears", awdlCoexHintClears, 32);
+    root->setProperty("AwCoexBaAsksShared", awdlCoexBaAsksShared, 32);
+    root->setProperty("AwCoexBaAskShared", awdlCoexBaAskShared);
+    root->setProperty("AwCoexBaSharedOff", awdlCoexNoSharedBa);
+    root->setProperty("AwCoexBaPeerWidth", awdlCoexBaPeerWidth, 32);
     if (auto *seq = OSData::withBytes(awdlCoexPeerSeq, sizeof(awdlCoexPeerSeq))) {
-        root->setProperty("ITLAWDLCoexPeerSequence", seq);
+        root->setProperty("AwCoexPeerSequence", seq);
         seq->release();
     }
-    root->setProperty("ITLAWDLCoexPeerSequenceFrames", awdlCoexPeerSeqFrames, 32);
-    root->setProperty("ITLAWDLCoexPeerSequenceUpdates", awdlCoexPeerSeqChanges, 32);
-    root->setProperty("ITLAWDLCoexMacResult", awdlCoexMacResult, 32);
-    root->setProperty("ITLAWDLCoexBindResult", awdlCoexBindResult, 32);
-    root->setProperty("ITLAWDLCoexBindStatus", awdlCoexBindStatus, 32);
-    root->setProperty("ITLAWDLCoexChannel", awdlCoexChannel, 32);
-    root->setProperty("ITLAWDLCoexAwdlAction", awdlCoexAwdlAction, 32);
-    root->setProperty("ITLAWDLCoexAwdlData", awdlCoexAwdlData, 32);
-    root->setProperty("ITLAWDLCoexOther", awdlCoexOther, 32);
-    root->setProperty("ITLAWDLCoexFilter", awdlCoexFilter, 32);
+    root->setProperty("AwCoexPeerSequenceFrames", awdlCoexPeerSeqFrames, 32);
+    root->setProperty("AwCoexPeerSequenceUpdates", awdlCoexPeerSeqChanges, 32);
+    root->setProperty("AwCoexMacResult", awdlCoexMacResult, 32);
+    root->setProperty("AwCoexBindResult", awdlCoexBindResult, 32);
+    root->setProperty("AwCoexBindStatus", awdlCoexBindStatus, 32);
+    root->setProperty("AwCoexChannel", awdlCoexChannel, 32);
+    root->setProperty("AwCoexAwdlAction", awdlCoexAwdlAction, 32);
+    root->setProperty("AwCoexAwdlData", awdlCoexAwdlData, 32);
+    root->setProperty("AwCoexOther", awdlCoexOther, 32);
+    root->setProperty("AwCoexFilter", awdlCoexFilter, 32);
     if (awdlCoexTx) {
-        root->setProperty("ITLAWDLCoexStaResult", awdlCoexStaResult, 32);
-        root->setProperty("ITLAWDLCoexQueueResult", awdlCoexQueueResult, 32);
-        root->setProperty("ITLAWDLCoexQueueClash", awdlCoexQueueClash);
-        root->setProperty("ITLAWDLCoexQueueFwqid", awdlCoexQueueFwqid, 32);
-        root->setProperty("ITLAWDLCoexTidQidsCleared", awdlCoexTidQidsCleared, 32);
-        root->setProperty("ITLAWDLCoexQueueStage", awdlCoexQueueStage);
-        root->setProperty("ITLAWDLCoexQueueAssigned", uint32_t(awdlCoexQueueAssigned), 32);
-        root->setProperty("ITLAWDLCoexQueueWritePointer", awdlCoexQueueWritePointer, 32);
-        root->setProperty("ITLAWDLCoexSetupAttempts", awdlCoexSetupAttempts, 32);
-        root->setProperty("ITLAWDLCoexTxHalted", awdlCoexTxHalted);
-        root->setProperty("ITLAWDLCoexSetupAborts", awdlCoexSetupAborts, 32);
-        root->setProperty("ITLAWDLCoexBadCompletions", awdlCoexBadCompletions, 32);
-        root->setProperty("ITLAWDLCoexLastSlot", uint32_t(awdlCoexLastSlot), 32);
-        root->setProperty("ITLAWDLCoexLastBoundary", uint32_t(awdlCoexLastBoundary), 32);
-        root->setProperty("ITLAWDLCoexLastSsn", awdlCoexLastSsn, 32);
+        root->setProperty("AwCoexStaResult", awdlCoexStaResult, 32);
+        root->setProperty("AwCoexQueueResult", awdlCoexQueueResult, 32);
+        root->setProperty("AwCoexQueueClash", awdlCoexQueueClash);
+        root->setProperty("AwCoexQueueFwqid", awdlCoexQueueFwqid, 32);
+        root->setProperty("AwCoexTidQidsCleared", awdlCoexTidQidsCleared, 32);
+        root->setProperty("AwCoexQueueStage", awdlCoexQueueStage);
+        root->setProperty("AwCoexQueueAssigned", uint32_t(awdlCoexQueueAssigned), 32);
+        root->setProperty("AwCoexQueueWritePointer", awdlCoexQueueWritePointer, 32);
+        root->setProperty("AwCoexSetupAttempts", awdlCoexSetupAttempts, 32);
+        root->setProperty("AwCoexTxHalted", awdlCoexTxHalted);
+        root->setProperty("AwCoexSetupAborts", awdlCoexSetupAborts, 32);
+        root->setProperty("AwCoexBadCompletions", awdlCoexBadCompletions, 32);
+        root->setProperty("AwCoexLastSlot", uint32_t(awdlCoexLastSlot), 32);
+        root->setProperty("AwCoexLastBoundary", uint32_t(awdlCoexLastBoundary), 32);
+        root->setProperty("AwCoexLastSsn", awdlCoexLastSsn, 32);
         if (awdlCoexFaultSnapshot[0])
-            root->setProperty("ITLAWDLCoexFault", awdlCoexFaultSnapshot);
-        root->setProperty("ITLAWDLCoexOrphanQueue", uint32_t(awdlCoexOrphanQueue), 32);
-        root->setProperty("ITLAWDLCoexTxBuilt", awdlCoexTxBuilt, 32);
-        root->setProperty("ITLAWDLCoexUnassocTxs", awdlCoexUnassocTxs, 32);
-        root->setProperty("ITLAWDLCoexMacType", awdlCoexMacTypeSel, 32);
-        root->setProperty("ITLAWDLCoexTxNotReady", awdlCoexTxNotReady, 32);
-        root->setProperty("ITLAWDLCoexTxBuildRejected", awdlCoexTxBuildRejected, 32);
-        root->setProperty("ITLAWDLCoexRefusedReason", awdlCoexRefusedReason, 32);
-        root->setProperty("ITLAWDLCoexRefusedChannelFlags", awdlCoexRefusedChannelFlags, 32);
+            root->setProperty("AwCoexFault", awdlCoexFaultSnapshot);
+        root->setProperty("AwCoexOrphanQueue", uint32_t(awdlCoexOrphanQueue), 32);
+        root->setProperty("AwCoexTxBuilt", awdlCoexTxBuilt, 32);
+        root->setProperty("AwCoexUnassocTxs", awdlCoexUnassocTxs, 32);
+        root->setProperty("AwCoexMacType", awdlCoexMacTypeSel, 32);
+        root->setProperty("AwCoexTxNotReady", awdlCoexTxNotReady, 32);
+        root->setProperty("AwCoexTxBuildRejected", awdlCoexTxBuildRejected, 32);
+        root->setProperty("AwCoexRefusedReason", awdlCoexRefusedReason, 32);
+        root->setProperty("AwCoexRefusedChannelFlags", awdlCoexRefusedChannelFlags, 32);
         if (awdlCoexRefusalSnapshot[0])
-            root->setProperty("ITLAWDLCoexLastRefusal", awdlCoexRefusalSnapshot);
-        root->setProperty("ITLAWDLCoexActionOnChannel", awdlCoexActionOnChannel, 32);
-        root->setProperty("ITLAWDLCoexActionOffChannel", awdlCoexActionOffChannel, 32);
-        root->setProperty("ITLAWDLCoexLastBuildResult", awdlCoexLastBuildResult, 32);
-        root->setProperty("ITLAWDLCoexTxSubmitted", awdlCoexTxSubmitted, 32);
-        root->setProperty("ITLAWDLCoexTxSubmitErrors", awdlCoexTxSubmitErrors, 32);
-        root->setProperty("ITLAWDLCoexTxOK", awdlCoexTxOK, 32);
-        root->setProperty("ITLAWDLCoexTxFailed", awdlCoexTxFailed, 32);
-        root->setProperty("ITLAWDLCoexTxStuck", awdlCoexTxStuck, 32);
-        root->setProperty("ITLAWDLCoexTxRefusedChannel", awdlCoexTxRefusedChannel, 32);
-        root->setProperty("ITLAWDLCoexAddrChanges", awdlCoexAddrChanges, 32);
-        root->setProperty("ITLAWDLCoexAddrFailures", awdlCoexAddrFailures, 32);
-        root->setProperty("ITLAWDLCoexAddrApplied", awdlCoexAddrApplied);
-        root->setProperty("ITLAWDLCoexLateCompletions", awdlCoexLateCompletions, 32);
-        root->setProperty("ITLAWDLCoexTeardownErrors", awdlCoexTeardownErrors, 32);
+            root->setProperty("AwCoexLastRefusal", awdlCoexRefusalSnapshot);
+        root->setProperty("AwCoexActionOnChannel", awdlCoexActionOnChannel, 32);
+        root->setProperty("AwCoexActionOffChannel", awdlCoexActionOffChannel, 32);
+        root->setProperty("AwCoexLastBuildResult", awdlCoexLastBuildResult, 32);
+        root->setProperty("AwCoexTxSubmitted", awdlCoexTxSubmitted, 32);
+        root->setProperty("AwCoexTxSubmitErrors", awdlCoexTxSubmitErrors, 32);
+        root->setProperty("AwCoexTxOK", awdlCoexTxOK, 32);
+        root->setProperty("AwCoexTxFailed", awdlCoexTxFailed, 32);
+        root->setProperty("AwCoexTxStuck", awdlCoexTxStuck, 32);
+        root->setProperty("AwCoexTxRefusedChannel", awdlCoexTxRefusedChannel, 32);
+        root->setProperty("AwCoexAddrChanges", awdlCoexAddrChanges, 32);
+        root->setProperty("AwCoexAddrFailures", awdlCoexAddrFailures, 32);
+        root->setProperty("AwCoexAddrApplied", awdlCoexAddrApplied);
+        root->setProperty("AwCoexLateCompletions", awdlCoexLateCompletions, 32);
+        root->setProperty("AwCoexTeardownErrors", awdlCoexTeardownErrors, 32);
         if (awdlCoexData) {
-            root->setProperty("ITLAWDLCoexDataRx", awdlCoexDataRx, 32);
-            root->setProperty("ITLAWDLCoexDataRxHandedOff", awdlCoexDataRxDelivered, 32);
-            root->setProperty("ITLAWDLCoexDataRxMalformed", awdlCoexDataRxMalformed, 32);
-            root->setProperty("ITLAWDLCoexDataRxUnknownPeer", awdlCoexDataRxUnknownPeer, 32);
-            root->setProperty("ITLAWDLCoexDataRxOffChannel", awdlCoexDataRxOffChannel, 32);
-            root->setProperty("ITLAWDLCoexDataRxRetry", awdlCoexDataRxRetry, 32);
-            root->setProperty("ITLAWDLCoexRxWide80", awdlCoexRxWide80, 32);
+            root->setProperty("AwCoexDataRx", awdlCoexDataRx, 32);
+            root->setProperty("AwCoexDataRxHandedOff", awdlCoexDataRxDelivered, 32);
+            root->setProperty("AwCoexDataRxMalformed", awdlCoexDataRxMalformed, 32);
+            root->setProperty("AwCoexDataRxUnknownPeer", awdlCoexDataRxUnknownPeer, 32);
+            root->setProperty("AwCoexDataRxOffChannel", awdlCoexDataRxOffChannel, 32);
+            root->setProperty("AwCoexDataRxRetry", awdlCoexDataRxRetry, 32);
+            root->setProperty("AwCoexRxWide80", awdlCoexRxWide80, 32);
             if (auto *mods = OSData::withBytes(awdlCoexRxModulation, sizeof(awdlCoexRxModulation))) {
-                root->setProperty("ITLAWDLCoexRxModulation", mods);
+                root->setProperty("AwCoexRxModulation", mods);
                 mods->release();
             }
-            root->setProperty("ITLAWDLCoexBaRequests", awdlCoexBaRequests, 32);
-            root->setProperty("ITLAWDLCoexBaSessions", awdlCoexBaSessions, 32);
-            root->setProperty("ITLAWDLCoexBaAnswers", awdlCoexBaAnswers, 32);
-            root->setProperty("ITLAWDLCoexBaAnswerErrors", awdlCoexBaAnswerErrors, 32);
-            root->setProperty("ITLAWDLCoexBaOtherPeer", awdlCoexBaOtherPeer, 32);
+            root->setProperty("AwCoexBaRequests", awdlCoexBaRequests, 32);
+            root->setProperty("AwCoexBaSessions", awdlCoexBaSessions, 32);
+            root->setProperty("AwCoexBaAnswers", awdlCoexBaAnswers, 32);
+            root->setProperty("AwCoexBaAnswerErrors", awdlCoexBaAnswerErrors, 32);
+            root->setProperty("AwCoexBaOtherPeer", awdlCoexBaOtherPeer, 32);
             // Per-slot Block Ack telemetry: one set of keys per peer slot.
             {
                 static const char *const kBaTxStateNames[] = {"off", "asking", "agreed", "failed", "enabling"};
                 char key[48];
                 for (unsigned baSlot = 0; baSlot < kAwdlCoexBaMaxPeers; ++baSlot) {
                     const auto &s = awdlCoexBaSlots[baSlot];
-                    snprintf(key, sizeof(key), "ITLAWDLCoexBa%uPeerAdded", baSlot);
+                    snprintf(key, sizeof(key), "AwCoexBa%uPeerAdded", baSlot);
                     root->setProperty(key, s.peerAdded);
-                    snprintf(key, sizeof(key), "ITLAWDLCoexBa%uSessions", baSlot);
+                    snprintf(key, sizeof(key), "AwCoexBa%uSessions", baSlot);
                     root->setProperty(key, s.sessions, 32);
-                    snprintf(key, sizeof(key), "ITLAWDLCoexBa%uAnswers", baSlot);
+                    snprintf(key, sizeof(key), "AwCoexBa%uAnswers", baSlot);
                     root->setProperty(key, s.answers, 32);
-                    snprintf(key, sizeof(key), "ITLAWDLCoexBa%uTxStateName", baSlot);
+                    snprintf(key, sizeof(key), "AwCoexBa%uTxStateName", baSlot);
                     root->setProperty(key, s.txState >= 0 && s.txState < int(nitems(kBaTxStateNames))
                                           ? kBaTxStateNames[s.txState] : "unknown");
-                    snprintf(key, sizeof(key), "ITLAWDLCoexBa%uTxAgreements", baSlot);
+                    snprintf(key, sizeof(key), "AwCoexBa%uTxAgreements", baSlot);
                     root->setProperty(key, s.txAgreements, 32);
-                    snprintf(key, sizeof(key), "ITLAWDLCoexBa%uTxAcked", baSlot);
+                    snprintf(key, sizeof(key), "AwCoexBa%uTxAcked", baSlot);
                     root->setProperty(key, s.txAcked, 32);
-                    snprintf(key, sizeof(key), "ITLAWDLCoexBa%uTxNotifs", baSlot);
+                    snprintf(key, sizeof(key), "AwCoexBa%uTxNotifs", baSlot);
                     root->setProperty(key, s.txNotifs, 32);
-                    snprintf(key, sizeof(key), "ITLAWDLCoexBa%uHeTx", baSlot);
+                    snprintf(key, sizeof(key), "AwCoexBa%uHeTx", baSlot);
                     root->setProperty(key, awdlCoexHeTxWantedSlot(baSlot));
-                    snprintf(key, sizeof(key), "ITLAWDLCoexBa%uPeerHe", baSlot);
+                    snprintf(key, sizeof(key), "AwCoexBa%uPeerHe", baSlot);
                     root->setProperty(key, s.peerHeUS && awdlUptimeUS() - s.peerHeUS < 60000000ULL);
-                    snprintf(key, sizeof(key), "ITLAWDLCoexBa%uPeerHeFrames", baSlot);
+                    snprintf(key, sizeof(key), "AwCoexBa%uPeerHeFrames", baSlot);
                     root->setProperty(key, s.peerHeFrames, 32);
-                    snprintf(key, sizeof(key), "ITLAWDLCoexBa%uHeTxFrames", baSlot);
+                    snprintf(key, sizeof(key), "AwCoexBa%uHeTxFrames", baSlot);
                     root->setProperty(key, s.heTxFrames, 32);
-                    snprintf(key, sizeof(key), "ITLAWDLCoexBa%uHePoorAcks", baSlot);
+                    snprintf(key, sizeof(key), "AwCoexBa%uHePoorAcks", baSlot);
                     root->setProperty(key, s.hePoorAcks, 32);
-                    snprintf(key, sizeof(key), "ITLAWDLCoexBa%uStatus", baSlot);
+                    snprintf(key, sizeof(key), "AwCoexBa%uStatus", baSlot);
                     root->setProperty(key, s.status, 32);
                     // What this slot had to send, and what its own handshake did: separates "no data for this
                     // peer" from "data queued but the agreement never came up".
-                    snprintf(key, sizeof(key), "ITLAWDLCoexBa%uDestPayloads", baSlot);
+                    snprintf(key, sizeof(key), "AwCoexBa%uDestPayloads", baSlot);
                     root->setProperty(key, s.destPayloads, 32);
-                    snprintf(key, sizeof(key), "ITLAWDLCoexBa%uTxAsks", baSlot);
+                    snprintf(key, sizeof(key), "AwCoexBa%uTxAsks", baSlot);
                     root->setProperty(key, s.txAsks, 32);
-                    snprintf(key, sizeof(key), "ITLAWDLCoexBa%uBulk", baSlot);
+                    snprintf(key, sizeof(key), "AwCoexBa%uBulk", baSlot);
                     root->setProperty(key, s.txBulk.bulk);
-                    snprintf(key, sizeof(key), "ITLAWDLCoexBa%uAccepted", baSlot);
+                    snprintf(key, sizeof(key), "AwCoexBa%uAccepted", baSlot);
                     root->setProperty(key, s.peerAccepted);
-                    snprintf(key, sizeof(key), "ITLAWDLCoexBa%uTxQueue", baSlot);
+                    snprintf(key, sizeof(key), "AwCoexBa%uTxQueue", baSlot);
                     root->setProperty(key, uint32_t(s.txQueue), 32);
                     // The peer this slot really holds: a stale address would be visible here.
                     char peerMac[24];
@@ -6880,146 +6880,146 @@ static void awdlCoexPublish()
                                  s.peer[1], s.peer[2], s.peer[3], s.peer[4], s.peer[5]);
                     else
                         snprintf(peerMac, sizeof(peerMac), "-");
-                    snprintf(key, sizeof(key), "ITLAWDLCoexBa%uMac", baSlot);
+                    snprintf(key, sizeof(key), "AwCoexBa%uMac", baSlot);
                     root->setProperty(key, peerMac);
                     // What the peer actually sent us: separates "it never answers" from "we never hear it".
-                    snprintf(key, sizeof(key), "ITLAWDLCoexBa%uRxActReq", baSlot);
+                    snprintf(key, sizeof(key), "AwCoexBa%uRxActReq", baSlot);
                     root->setProperty(key, s.rxActReq, 32);
-                    snprintf(key, sizeof(key), "ITLAWDLCoexBa%uRxActResp", baSlot);
+                    snprintf(key, sizeof(key), "AwCoexBa%uRxActResp", baSlot);
                     root->setProperty(key, s.rxActResp, 32);
-                    snprintf(key, sizeof(key), "ITLAWDLCoexBa%uRxActDelba", baSlot);
+                    snprintf(key, sizeof(key), "AwCoexBa%uRxActDelba", baSlot);
                     root->setProperty(key, s.rxActDelba, 32);
-                    snprintf(key, sizeof(key), "ITLAWDLCoexBa%uRxActOther", baSlot);
+                    snprintf(key, sizeof(key), "AwCoexBa%uRxActOther", baSlot);
                     root->setProperty(key, s.rxActOther, 32);
                     // Asks decided by this slot's own peer windows: uses of that table, those it held back
                     // because the peer was away, and those that went out while the peer was awake.
-                    snprintf(key, sizeof(key), "ITLAWDLCoexBa%uSchedUses", baSlot);
+                    snprintf(key, sizeof(key), "AwCoexBa%uSchedUses", baSlot);
                     root->setProperty(key, s.txSchedUses, 32);
-                    snprintf(key, sizeof(key), "ITLAWDLCoexBa%uAskAway", baSlot);
+                    snprintf(key, sizeof(key), "AwCoexBa%uAskAway", baSlot);
                     root->setProperty(key, s.txAskAway, 32);
-                    snprintf(key, sizeof(key), "ITLAWDLCoexBa%uAskAwake", baSlot);
+                    snprintf(key, sizeof(key), "AwCoexBa%uAskAwake", baSlot);
                     root->setProperty(key, s.txAskAwake, 32);
                     // Why a slot with data still never reaches the aggregate queue.
-                    snprintf(key, sizeof(key), "ITLAWDLCoexBa%uPaused", baSlot);
+                    snprintf(key, sizeof(key), "AwCoexBa%uPaused", baSlot);
                     root->setProperty(key, s.peerPause.paused);
-                    snprintf(key, sizeof(key), "ITLAWDLCoexBa%uPauses", baSlot);
+                    snprintf(key, sizeof(key), "AwCoexBa%uPauses", baSlot);
                     root->setProperty(key, s.peerPause.pauses, 32);
-                    snprintf(key, sizeof(key), "ITLAWDLCoexBa%uAggSkipPaused", baSlot);
+                    snprintf(key, sizeof(key), "AwCoexBa%uAggSkipPaused", baSlot);
                     root->setProperty(key, s.aggSkipPaused, 32);
-                    snprintf(key, sizeof(key), "ITLAWDLCoexBa%uAggSkipCap", baSlot);
+                    snprintf(key, sizeof(key), "AwCoexBa%uAggSkipCap", baSlot);
                     root->setProperty(key, s.aggSkipCap, 32);
-                    snprintf(key, sizeof(key), "ITLAWDLCoexBa%uAggSkipShape", baSlot);
+                    snprintf(key, sizeof(key), "AwCoexBa%uAggSkipShape", baSlot);
                     root->setProperty(key, s.aggSkipShape, 32);
-                    snprintf(key, sizeof(key), "ITLAWDLCoexBa%uOrderViaAgg", baSlot);
+                    snprintf(key, sizeof(key), "AwCoexBa%uOrderViaAgg", baSlot);
                     root->setProperty(key, s.orderViaAgg, 32);
                     // What this slot agreed to, and how many frames that allows outstanding: the pair that
                     // tells a slow slot from one the peer never gave a full window.
-                    snprintf(key, sizeof(key), "ITLAWDLCoexBa%uWindow", baSlot);
+                    snprintf(key, sizeof(key), "AwCoexBa%uWindow", baSlot);
                     root->setProperty(key, uint32_t(s.txWindow), 32);
-                    snprintf(key, sizeof(key), "ITLAWDLCoexBa%uQueuedCap", baSlot);
+                    snprintf(key, sizeof(key), "AwCoexBa%uQueuedCap", baSlot);
                     root->setProperty(key, awdlCoexBaTxQueuedCap(s), 32);
-                    snprintf(key, sizeof(key), "ITLAWDLCoexBa%uWidth", baSlot);
+                    snprintf(key, sizeof(key), "AwCoexBa%uWidth", baSlot);
                     root->setProperty(key, s.peerWidth, 32);
-                    snprintf(key, sizeof(key), "ITLAWDLCoexBa%uTxSubmitErrors", baSlot);
+                    snprintf(key, sizeof(key), "AwCoexBa%uTxSubmitErrors", baSlot);
                     root->setProperty(key, s.txSubmitErrors, 32);
                     // Promiscuous-RX probes this slot was granted. Zero on a slot that asked means it never
                     // reached the receive filter.
-                    snprintf(key, sizeof(key), "ITLAWDLCoexBa%uProbes", baSlot);
+                    snprintf(key, sizeof(key), "AwCoexBa%uProbes", baSlot);
                     root->setProperty(key, s.probeStarts, 32);
-                    snprintf(key, sizeof(key), "ITLAWDLCoexBa%uTxFrames", baSlot);
+                    snprintf(key, sizeof(key), "AwCoexBa%uTxFrames", baSlot);
                     root->setProperty(key, s.txFrames, 32);
-                    snprintf(key, sizeof(key), "ITLAWDLCoexBa%uQueued", baSlot);
+                    snprintf(key, sizeof(key), "AwCoexBa%uQueued", baSlot);
                     root->setProperty(key, awdlCoexBaQueuedNow[baSlot], 32);
                 }
             }
-            root->setProperty("ITLAWDLCoexBaDelbas", awdlCoexBaDelbas, 32);
-            root->setProperty("ITLAWDLCoexBaStatus", awdlCoexBaStatus, 32);
-            root->setProperty("ITLAWDLCoexBaPeerAdded", awdlCoexBaPeerAdded);
-            root->setProperty("ITLAWDLCoexBaFilterOff", awdlCoexBaFilterOff);
-            root->setProperty("ITLAWDLCoexBaFilterChanges", awdlCoexBaFilterChanges, 32);
-            root->setProperty("ITLAWDLCoexBaBroken", awdlCoexBaFailedGen >= 0 && awdlCoexBaFailedGen == awdlCoexGeneration);
-            root->setProperty("ITLAWDLCoexRateStep", uint32_t(awdlCoexRateStep), 32);
-            root->setProperty("ITLAWDLCoexRateUps", awdlCoexRateUps, 32);
-            root->setProperty("ITLAWDLCoexRateDowns", awdlCoexRateDowns, 32);
-            root->setProperty("ITLAWDLCoexMgmtOK", awdlCoexMgmtOK, 32);
-            root->setProperty("ITLAWDLCoexMgmtFailed", awdlCoexMgmtFailed, 32);
-            root->setProperty("ITLAWDLCoexBaTxState", uint32_t(awdlCoexBaTxState), 32);
+            root->setProperty("AwCoexBaDelbas", awdlCoexBaDelbas, 32);
+            root->setProperty("AwCoexBaStatus", awdlCoexBaStatus, 32);
+            root->setProperty("AwCoexBaPeerAdded", awdlCoexBaPeerAdded);
+            root->setProperty("AwCoexBaFilterOff", awdlCoexBaFilterOff);
+            root->setProperty("AwCoexBaFilterChanges", awdlCoexBaFilterChanges, 32);
+            root->setProperty("AwCoexBaBroken", awdlCoexBaFailedGen >= 0 && awdlCoexBaFailedGen == awdlCoexGeneration);
+            root->setProperty("AwCoexRateStep", uint32_t(awdlCoexRateStep), 32);
+            root->setProperty("AwCoexRateUps", awdlCoexRateUps, 32);
+            root->setProperty("AwCoexRateDowns", awdlCoexRateDowns, 32);
+            root->setProperty("AwCoexMgmtOK", awdlCoexMgmtOK, 32);
+            root->setProperty("AwCoexMgmtFailed", awdlCoexMgmtFailed, 32);
+            root->setProperty("AwCoexBaTxState", uint32_t(awdlCoexBaTxState), 32);
             {
                 // The number alone was misread in a report (1 is still asking, not agreed).
                 static const char *const kBaTxStateNames[] = {"off", "asking", "agreed", "failed", "enabling"};
-                root->setProperty("ITLAWDLCoexBaTxStateName",
+                root->setProperty("AwCoexBaTxStateName",
                                   awdlCoexBaTxState >= 0 && awdlCoexBaTxState < int(nitems(kBaTxStateNames))
                                       ? kBaTxStateNames[awdlCoexBaTxState] : "unknown");
             }
-            root->setProperty("ITLAWDLCoexBaTxQueueResult", awdlCoexBaTxQueueResult, 32);
-            root->setProperty("ITLAWDLCoexBaTxPeerAdds", awdlCoexBaTxPeerAdds, 32);
-            root->setProperty("ITLAWDLCoexBaTxAsks", awdlCoexBaTxAsks, 32);
-            root->setProperty("ITLAWDLCoexBaAskOK", awdlCoexBaAskOK, 32);
-            root->setProperty("ITLAWDLCoexBaAskFailed", awdlCoexBaAskFailed, 32);
-            root->setProperty("ITLAWDLCoexBaAsksSkippedAway", awdlCoexBaAsksSkippedAway, 32);
-            root->setProperty("ITLAWDLCoexBaPeerAccepted", awdlCoexBaPeerAccepted);
-            root->setProperty("ITLAWDLCoexBaTxAskRounds", awdlCoexBaTxAskRounds, 32);
-            root->setProperty("ITLAWDLCoexBaTxIdleHolds", awdlCoexBaTxIdleHolds, 32);
-            root->setProperty("ITLAWDLCoexBaTxAgreements", awdlCoexBaTxAgreements, 32);
-            root->setProperty("ITLAWDLCoexBaTxRefusals", awdlCoexBaTxRefusals, 32);
-            root->setProperty("ITLAWDLCoexBaTxDelbas", awdlCoexBaTxDelbas, 32);
-            root->setProperty("ITLAWDLCoexBaTxFrames", awdlCoexBaTxFrames, 32);
-            root->setProperty("ITLAWDLCoexBaTxSubmitErrors", awdlCoexBaTxSubmitErrors, 32);
-            root->setProperty("ITLAWDLCoexBaTxNotifs", awdlCoexBaTxNotifs, 32);
-            root->setProperty("ITLAWDLCoexBaTxSentAir", awdlCoexBaTxSentAir, 32);
-            root->setProperty("ITLAWDLCoexBaTxAcked", awdlCoexBaTxAcked, 32);
+            root->setProperty("AwCoexBaTxQueueResult", awdlCoexBaTxQueueResult, 32);
+            root->setProperty("AwCoexBaTxPeerAdds", awdlCoexBaTxPeerAdds, 32);
+            root->setProperty("AwCoexBaTxAsks", awdlCoexBaTxAsks, 32);
+            root->setProperty("AwCoexBaAskOK", awdlCoexBaAskOK, 32);
+            root->setProperty("AwCoexBaAskFailed", awdlCoexBaAskFailed, 32);
+            root->setProperty("AwCoexBaAsksSkippedAway", awdlCoexBaAsksSkippedAway, 32);
+            root->setProperty("AwCoexBaPeerAccepted", awdlCoexBaPeerAccepted);
+            root->setProperty("AwCoexBaTxAskRounds", awdlCoexBaTxAskRounds, 32);
+            root->setProperty("AwCoexBaTxIdleHolds", awdlCoexBaTxIdleHolds, 32);
+            root->setProperty("AwCoexBaTxAgreements", awdlCoexBaTxAgreements, 32);
+            root->setProperty("AwCoexBaTxRefusals", awdlCoexBaTxRefusals, 32);
+            root->setProperty("AwCoexBaTxDelbas", awdlCoexBaTxDelbas, 32);
+            root->setProperty("AwCoexBaTxFrames", awdlCoexBaTxFrames, 32);
+            root->setProperty("AwCoexBaTxSubmitErrors", awdlCoexBaTxSubmitErrors, 32);
+            root->setProperty("AwCoexBaTxNotifs", awdlCoexBaTxNotifs, 32);
+            root->setProperty("AwCoexBaTxSentAir", awdlCoexBaTxSentAir, 32);
+            root->setProperty("AwCoexBaTxAcked", awdlCoexBaTxAcked, 32);
             // Payload-sized frames seen for slot 0: slot 0 counts its own destination here instead of in
             // Ba0DestPayloads, so publishing it gives slots 1..N a number in the same unit to compare with.
-            root->setProperty("ITLAWDLCoexTxDestFrames", awdlCoexTxDestFrames, 32);
-            root->setProperty("ITLAWDLCoexBaTxBulk", awdlCoexBaTxBulk.bulk);
-            root->setProperty("ITLAWDLCoexAdvertise80Frames", awdlCoexAdvertise80Frames, 32);
+            root->setProperty("AwCoexTxDestFrames", awdlCoexTxDestFrames, 32);
+            root->setProperty("AwCoexBaTxBulk", awdlCoexBaTxBulk.bulk);
+            root->setProperty("AwCoexAdvertise80Frames", awdlCoexAdvertise80Frames, 32);
             if (auto *seen = OSData::withBytes(awdlCoexBaActionSeen, sizeof(awdlCoexBaActionSeen))) {
-                root->setProperty("ITLAWDLCoexBaActionSeen", seen);
+                root->setProperty("AwCoexBaActionSeen", seen);
                 seen->release();
             }
-            root->setProperty("ITLAWDLCoexBaActionAwdlBssid", awdlCoexBaActionAwdlBssid, 32);
-            root->setProperty("ITLAWDLCoexBaActionOtherBssid", awdlCoexBaActionOtherBssid, 32);
-            root->setProperty("ITLAWDLCoexRxWhileFilterOff", awdlCoexRxWhileFilterOff, 32);
-            root->setProperty("ITLAWDLCoexTxPauses", awdlCoexTxPauses, 32);
-            root->setProperty("ITLAWDLCoexWedgedRebuilds", awdlCoexWedgedRebuilds, 32);
-            root->setProperty("ITLAWDLCoexBaTxEnabled", awdlCoexBaTxEnabled);
-            root->setProperty("ITLAWDLCoexPeerPauseEnabled", awdlCoexBaPeerPauseEnabled);
-            root->setProperty("ITLAWDLCoexPeerPaused", awdlCoexPeerPause.paused);
-            root->setProperty("ITLAWDLCoexPeerPauses", awdlCoexPeerPause.pauses, 32);
-            root->setProperty("ITLAWDLCoexPeerForcedResumes", awdlCoexPeerPause.forcedResumes, 32);
-            root->setProperty("ITLAWDLCoexPeerPauseErrors", awdlCoexPeerPause.commandErrors, 32);
-            root->setProperty("ITLAWDLCoexBaTxLastRate", awdlCoexBaTxLastRate, 32);
-            root->setProperty("ITLAWDLCoexBaTxVht80TwoStreamNotifs", awdlCoexBaTxVht80TwoStreamNotifs, 32);
-            root->setProperty("ITLAWDLCoexBaTxPeakReportedFrames", awdlCoexBaTxPeakReportedFrames, 32);
-            root->setProperty("ITLAWDLCoexRxVht80TwoStream", awdlCoexRxVht80TwoStream, 32);
-            root->setProperty("ITLAWDLCoexBaTxResponses", awdlCoexBaTxResponses, 32);
-            root->setProperty("ITLAWDLCoexBaTxResponseFrames", awdlCoexBaTxResponseFrames, 32);
-            root->setProperty("ITLAWDLCoexBaTxAggResponses", awdlCoexBaTxAggResponses, 32);
-            root->setProperty("ITLAWDLCoexBaTxPeakQueued", awdlCoexBaTxPeakQueued, 32);
-            root->setProperty("ITLAWDLCoexBaTxPausedFullDeferrals", awdlCoexBaTxPausedFullDeferrals, 32);
-            root->setProperty("ITLAWDLCoexBaRefillEnabled", awdlCoexBaRefillEnabled);
-            root->setProperty("ITLAWDLCoexHeTxMcs", awdlCoexHeTxMcs, 32);
-            root->setProperty("ITLAWDLCoexHeTxDemotes", awdlCoexHeTxDemotes, 32);
-            root->setProperty("ITLAWDLCoexBaRefillKicks", awdlCoexBaRefillKicks, 32);
-            root->setProperty("ITLAWDLCoexBaEmptyWithReady", awdlCoexBaEmptyWithReady, 32);
-            root->setProperty("ITLAWDLCoexBaEmptyNoReady", awdlCoexBaEmptyNoReady, 32);
-            root->setProperty("ITLAWDLCoexBaRefillStillEmptyReady", awdlCoexBaRefillStillEmptyReady, 32);
-            root->setProperty("ITLAWDLCoexBaFilterHysteresis", awdlCoexBaFilterHysteresis);
-            root->setProperty("ITLAWDLCoexAwHold", awdlCoexAwHold);
-            root->setProperty("ITLAWDLCoexOrder", awdlCoexOrder);
-            root->setProperty("ITLAWDLCoexOrderHeld", awdlCoexOrderHeld, 32);
-            root->setProperty("ITLAWDLCoexOrderViaAgg", awdlCoexOrderViaAgg, 32);
-            root->setProperty("ITLAWDLCoexOrderSingleBehindAgg", awdlCoexOrderSingleBehindAgg, 32);
-            root->setProperty("ITLAWDLCoexOrderStalled", awdlCoexOrderStalled, 32);
-            root->setProperty("ITLAWDLCoexBaTxRespOK", awdlCoexBaTxRespOK, 32);
-            root->setProperty("ITLAWDLCoexBaTxRespFailed", awdlCoexBaTxRespFailed, 32);
-            root->setProperty("ITLAWDLCoexBaTxRespLastFailStatus", awdlCoexBaTxRespLastFailStatus, 32);
-            root->setProperty("ITLAWDLCoexAwSyncAssume", awdlCoexAwSyncAssume);
-            root->setProperty("ITLAWDLCoexBaEarlyAggFrames", awdlCoexBaEarlyAggFrames, 32);
-            root->setProperty("ITLAWDLCoexPauseResumeFailures", awdlCoexPauseResumeFailures, 32);
-            root->setProperty("ITLAWDLCoexResumeRetirements", awdlCoexResumeRetirements, 32);
-            root->setProperty("ITLAWDLCoexBaRxIdleTeardowns", awdlCoexBaRxIdleTeardowns, 32);
-            root->setProperty("ITLAWDLCoexBaDelbasSent", awdlCoexBaDelbasSent, 32);
+            root->setProperty("AwCoexBaActionAwdlBssid", awdlCoexBaActionAwdlBssid, 32);
+            root->setProperty("AwCoexBaActionOtherBssid", awdlCoexBaActionOtherBssid, 32);
+            root->setProperty("AwCoexRxWhileFilterOff", awdlCoexRxWhileFilterOff, 32);
+            root->setProperty("AwCoexTxPauses", awdlCoexTxPauses, 32);
+            root->setProperty("AwCoexWedgedRebuilds", awdlCoexWedgedRebuilds, 32);
+            root->setProperty("AwCoexBaTxEnabled", awdlCoexBaTxEnabled);
+            root->setProperty("AwCoexPeerPauseEnabled", awdlCoexBaPeerPauseEnabled);
+            root->setProperty("AwCoexPeerPaused", awdlCoexPeerPause.paused);
+            root->setProperty("AwCoexPeerPauses", awdlCoexPeerPause.pauses, 32);
+            root->setProperty("AwCoexPeerForcedResumes", awdlCoexPeerPause.forcedResumes, 32);
+            root->setProperty("AwCoexPeerPauseErrors", awdlCoexPeerPause.commandErrors, 32);
+            root->setProperty("AwCoexBaTxLastRate", awdlCoexBaTxLastRate, 32);
+            root->setProperty("AwCoexBaTxVht80TwoStreamNotifs", awdlCoexBaTxVht80TwoStreamNotifs, 32);
+            root->setProperty("AwCoexBaTxPeakReportedFrames", awdlCoexBaTxPeakReportedFrames, 32);
+            root->setProperty("AwCoexRxVht80TwoStream", awdlCoexRxVht80TwoStream, 32);
+            root->setProperty("AwCoexBaTxResponses", awdlCoexBaTxResponses, 32);
+            root->setProperty("AwCoexBaTxResponseFrames", awdlCoexBaTxResponseFrames, 32);
+            root->setProperty("AwCoexBaTxAggResponses", awdlCoexBaTxAggResponses, 32);
+            root->setProperty("AwCoexBaTxPeakQueued", awdlCoexBaTxPeakQueued, 32);
+            root->setProperty("AwCoexBaTxPausedFullDeferrals", awdlCoexBaTxPausedFullDeferrals, 32);
+            root->setProperty("AwCoexBaRefillEnabled", awdlCoexBaRefillEnabled);
+            root->setProperty("AwCoexHeTxMcs", awdlCoexHeTxMcs, 32);
+            root->setProperty("AwCoexHeTxDemotes", awdlCoexHeTxDemotes, 32);
+            root->setProperty("AwCoexBaRefillKicks", awdlCoexBaRefillKicks, 32);
+            root->setProperty("AwCoexBaEmptyWithReady", awdlCoexBaEmptyWithReady, 32);
+            root->setProperty("AwCoexBaEmptyNoReady", awdlCoexBaEmptyNoReady, 32);
+            root->setProperty("AwCoexBaRefillStillEmptyReady", awdlCoexBaRefillStillEmptyReady, 32);
+            root->setProperty("AwCoexBaFilterHysteresis", awdlCoexBaFilterHysteresis);
+            root->setProperty("AwCoexAwHold", awdlCoexAwHold);
+            root->setProperty("AwCoexOrder", awdlCoexOrder);
+            root->setProperty("AwCoexOrderHeld", awdlCoexOrderHeld, 32);
+            root->setProperty("AwCoexOrderViaAgg", awdlCoexOrderViaAgg, 32);
+            root->setProperty("AwCoexOrderSingleBehindAgg", awdlCoexOrderSingleBehindAgg, 32);
+            root->setProperty("AwCoexOrderStalled", awdlCoexOrderStalled, 32);
+            root->setProperty("AwCoexBaTxRespOK", awdlCoexBaTxRespOK, 32);
+            root->setProperty("AwCoexBaTxRespFailed", awdlCoexBaTxRespFailed, 32);
+            root->setProperty("AwCoexBaTxRespLastFailStatus", awdlCoexBaTxRespLastFailStatus, 32);
+            root->setProperty("AwCoexAwSyncAssume", awdlCoexAwSyncAssume);
+            root->setProperty("AwCoexBaEarlyAggFrames", awdlCoexBaEarlyAggFrames, 32);
+            root->setProperty("AwCoexPauseResumeFailures", awdlCoexPauseResumeFailures, 32);
+            root->setProperty("AwCoexResumeRetirements", awdlCoexResumeRetirements, 32);
+            root->setProperty("AwCoexBaRxIdleTeardowns", awdlCoexBaRxIdleTeardowns, 32);
+            root->setProperty("AwCoexBaDelbasSent", awdlCoexBaDelbasSent, 32);
             {
                 // One row per event: "index ms type a b c d id". The first 64 of the boot and the newest 128; the
                 // reader removes the overlap by index and shows any gap. A row is at most 52 bytes.
@@ -7038,24 +7038,24 @@ static void awdlCoexPublish()
                 dump(text, sizeof(text), total > 128 ? total - 128 : 0, total, awdlCoexBaEvents,
                      nitems(awdlCoexBaEvents));
                 dump(first, sizeof(first), 0, total < 64 ? total : 64, awdlCoexBaEventsFirst, 64);
-                root->setProperty("ITLAWDLCoexBaEvents", text);
-                root->setProperty("ITLAWDLCoexBaEventsFirst", first);
-                root->setProperty("ITLAWDLCoexBaEventFormat", 154, 32);
-                root->setProperty("ITLAWDLCoexDelbaForced", awdlCoexDelbaForced, 32);
-                root->setProperty("ITLAWDLCoexDelbaConfirmed", awdlCoexDelbaConfirmed, 32);
-                root->setProperty("ITLAWDLCoexDelbaFailedTx", awdlCoexDelbaFailedTx, 32);
-                root->setProperty("ITLAWDLCoexStatusIdxHits", awdlCoexStatusIdxHits, 32);
-                root->setProperty("ITLAWDLCoexStatusIdxMisses", awdlCoexStatusIdxMisses, 32);
-                root->setProperty("ITLAWDLCoexMultiReclaims", awdlCoexMultiReclaims, 32);
-                root->setProperty("ITLAWDLCoexReclaimUnknown", awdlCoexReclaimUnknown, 32);
-                root->setProperty("ITLAWDLCoexSyncReclaimedUnknown", awdlCoexSyncReclaimedUnknown, 32);
-                root->setProperty("ITLAWDLCoexBaTxWindow", awdlCoexBaTxWindow, 32);
-                root->setProperty("ITLAWDLCoexBaTxSmallWindows", awdlCoexBaTxSmallWindows, 32);
-                root->setProperty("ITLAWDLCoexBaTxPolicyRefusals", awdlCoexBaTxPolicyRefusals, 32);
-                root->setProperty("ITLAWDLCoexBaNonAwdlBssidAccepted", awdlCoexBaNonAwdlBssidAccepted, 32);
-                root->setProperty("ITLAWDLCoexBaNonAwdlBssidApplied", awdlCoexBaNonAwdlBssidApplied, 32);
-                root->setProperty("ITLAWDLCoexDelbaRxTidRemoved", awdlCoexDelbaRxTidRemoved, 32);
-                root->setProperty("ITLAWDLCoexBaEventCount", awdlCoexBaEventCount, 32);
+                root->setProperty("AwCoexBaEvents", text);
+                root->setProperty("AwCoexBaEventsFirst", first);
+                root->setProperty("AwCoexBaEventFormat", 154, 32);
+                root->setProperty("AwCoexDelbaForced", awdlCoexDelbaForced, 32);
+                root->setProperty("AwCoexDelbaConfirmed", awdlCoexDelbaConfirmed, 32);
+                root->setProperty("AwCoexDelbaFailedTx", awdlCoexDelbaFailedTx, 32);
+                root->setProperty("AwCoexStatusIdxHits", awdlCoexStatusIdxHits, 32);
+                root->setProperty("AwCoexStatusIdxMisses", awdlCoexStatusIdxMisses, 32);
+                root->setProperty("AwCoexMultiReclaims", awdlCoexMultiReclaims, 32);
+                root->setProperty("AwCoexReclaimUnknown", awdlCoexReclaimUnknown, 32);
+                root->setProperty("AwCoexSyncReclaimedUnknown", awdlCoexSyncReclaimedUnknown, 32);
+                root->setProperty("AwCoexBaTxWindow", awdlCoexBaTxWindow, 32);
+                root->setProperty("AwCoexBaTxSmallWindows", awdlCoexBaTxSmallWindows, 32);
+                root->setProperty("AwCoexBaTxPolicyRefusals", awdlCoexBaTxPolicyRefusals, 32);
+                root->setProperty("AwCoexBaNonAwdlBssidAccepted", awdlCoexBaNonAwdlBssidAccepted, 32);
+                root->setProperty("AwCoexBaNonAwdlBssidApplied", awdlCoexBaNonAwdlBssidApplied, 32);
+                root->setProperty("AwCoexDelbaRxTidRemoved", awdlCoexDelbaRxTidRemoved, 32);
+                root->setProperty("AwCoexBaEventCount", awdlCoexBaEventCount, 32);
             }
             {
                 // One line per pair of other peers seen talking, and one per recent frame so the interleaving
@@ -7082,31 +7082,31 @@ static void awdlCoexPublish()
                                       e.pair, e.len, e.kind);
                 }
                 sniffTrace[tused < sizeof(sniffTrace) ? tused : sizeof(sniffTrace) - 1] = 0;
-                root->setProperty("ITLAWDLCoexSniff", sniff);
-                root->setProperty("ITLAWDLCoexSniffTrace", sniffTrace);
-                root->setProperty("ITLAWDLCoexSniffEventCount", awdlCoexSniffEventCount, 32);
-                root->setProperty("ITLAWDLCoexSniffToUs", awdlCoexSniffToUs, 32);
-                root->setProperty("ITLAWDLCoexSniffRelayed", awdlCoexSniffRelayed, 32);
-                root->setProperty("ITLAWDLCoexSniffGroup", awdlCoexSniffGroup, 32);
-                root->setProperty("ITLAWDLCoexSniffActionsRelayed", awdlCoexSniffActionsRelayed, 32);
+                root->setProperty("AwCoexSniff", sniff);
+                root->setProperty("AwCoexSniffTrace", sniffTrace);
+                root->setProperty("AwCoexSniffEventCount", awdlCoexSniffEventCount, 32);
+                root->setProperty("AwCoexSniffToUs", awdlCoexSniffToUs, 32);
+                root->setProperty("AwCoexSniffRelayed", awdlCoexSniffRelayed, 32);
+                root->setProperty("AwCoexSniffGroup", awdlCoexSniffGroup, 32);
+                root->setProperty("AwCoexSniffActionsRelayed", awdlCoexSniffActionsRelayed, 32);
             }
-            root->setProperty("ITLAWDLCoexLowLatency", awdlCoexLowLatency);
-            root->setProperty("ITLAWDLCoexLowLatencyResult", awdlCoexLowLatencyResult, 32);
-            root->setProperty("ITLAWDLCoexHolds", awdlCoexHolds, 32);
-            root->setProperty("ITLAWDLCoexHoldTicks", awdlCoexHoldTicks, 32);
-            root->setProperty("ITLAWDLCoexHoldForced", awdlCoexHoldForced, 32);
-            root->setProperty("ITLAWDLCoexGate", awdlCoexGate);
-            root->setProperty("ITLAWDLCoexGateHolds", awdlCoexGateHolds, 32);
-            root->setProperty("ITLAWDLCoexGateAwayTicks", awdlCoexGateAwayTicks, 32);
-            root->setProperty("ITLAWDLCoexGateDozeTicks", awdlCoexGateDozeTicks, 32);
-            root->setProperty("ITLAWDLCoexGateForced", awdlCoexGateForced, 32);
-            root->setProperty("ITLAWDLCoexGateQueuedPauses", awdlCoexGateQueuedPauses, 32);
-            root->setProperty("ITLAWDLCoexAssumeZero", awdlCoexAssumeZero);
-            root->setProperty("ITLAWDLCoexScheduleKnown", awdlCoexScheduleCurrent() && awdlCoexPeerSchedule.known() &&
+            root->setProperty("AwCoexLowLatency", awdlCoexLowLatency);
+            root->setProperty("AwCoexLowLatencyResult", awdlCoexLowLatencyResult, 32);
+            root->setProperty("AwCoexHolds", awdlCoexHolds, 32);
+            root->setProperty("AwCoexHoldTicks", awdlCoexHoldTicks, 32);
+            root->setProperty("AwCoexHoldForced", awdlCoexHoldForced, 32);
+            root->setProperty("AwCoexGate", awdlCoexGate);
+            root->setProperty("AwCoexGateHolds", awdlCoexGateHolds, 32);
+            root->setProperty("AwCoexGateAwayTicks", awdlCoexGateAwayTicks, 32);
+            root->setProperty("AwCoexGateDozeTicks", awdlCoexGateDozeTicks, 32);
+            root->setProperty("AwCoexGateForced", awdlCoexGateForced, 32);
+            root->setProperty("AwCoexGateQueuedPauses", awdlCoexGateQueuedPauses, 32);
+            root->setProperty("AwCoexAssumeZero", awdlCoexAssumeZero);
+            root->setProperty("AwCoexScheduleKnown", awdlCoexScheduleCurrent() && awdlCoexPeerSchedule.known() &&
                               awdlCoexPeerSchedule.fresh(awdlUptimeUS()));
-            root->setProperty("ITLAWDLCoexScheduleRefutations", awdlCoexPeerSchedule.refutations, 32);
-            root->setProperty("ITLAWDLCoexPeerPresentEntries", awdlCoexPeerSchedule.presentEntries(), 32);
-            root->setProperty("ITLAWDLCoexBaYields", awdlCoexBaYields, 32);
+            root->setProperty("AwCoexScheduleRefutations", awdlCoexPeerSchedule.refutations, 32);
+            root->setProperty("AwCoexPeerPresentEntries", awdlCoexPeerSchedule.presentEntries(), 32);
+            root->setProperty("AwCoexBaYields", awdlCoexBaYields, 32);
             // Probe: each peer's own availability, learned separately and used for nothing yet. A peer whose
             // Noted stays 0 sends no sync frames we can read; one whose Known stays false can't be timed at all.
             for (unsigned k = 0; k < kAwdlCoexProbePeers; ++k) {
@@ -7115,129 +7115,129 @@ static void awdlCoexPublish()
                     snprintf(mac, sizeof(mac), "%02x:%02x:%02x:%02x:%02x:%02x", awdlCoexProbePeer[k][0],
                              awdlCoexProbePeer[k][1], awdlCoexProbePeer[k][2], awdlCoexProbePeer[k][3],
                              awdlCoexProbePeer[k][4], awdlCoexProbePeer[k][5]);
-                snprintf(key, sizeof(key), "ITLAWDLCoexProbe%uMac", k);
+                snprintf(key, sizeof(key), "AwCoexProbe%uMac", k);
                 root->setProperty(key, mac);
                 const auto &ps = awdlCoexProbeSched[k];
-                snprintf(key, sizeof(key), "ITLAWDLCoexProbe%uFrames", k);
+                snprintf(key, sizeof(key), "AwCoexProbe%uFrames", k);
                 root->setProperty(key, awdlCoexProbeFrames[k], 32);
-                snprintf(key, sizeof(key), "ITLAWDLCoexProbe%uNoted", k);
+                snprintf(key, sizeof(key), "AwCoexProbe%uNoted", k);
                 root->setProperty(key, awdlCoexProbeNoted[k], 32);
-                snprintf(key, sizeof(key), "ITLAWDLCoexProbe%uEntries", k);
+                snprintf(key, sizeof(key), "AwCoexProbe%uEntries", k);
                 root->setProperty(key, ps.presentEntries(), 32);
-                snprintf(key, sizeof(key), "ITLAWDLCoexProbe%uKnown", k);
+                snprintf(key, sizeof(key), "AwCoexProbe%uKnown", k);
                 root->setProperty(key, ps.known());
-                snprintf(key, sizeof(key), "ITLAWDLCoexProbe%uCalibrated", k);
+                snprintf(key, sizeof(key), "AwCoexProbe%uCalibrated", k);
                 root->setProperty(key, ps.calibrated);
                 // Whether this peer's pause edges use a phase borrowed from the peer that calibrated.
-                snprintf(key, sizeof(key), "ITLAWDLCoexProbe%uBorrowed", k);
+                snprintf(key, sizeof(key), "AwCoexProbe%uBorrowed", k);
                 root->setProperty(key, ps.borrowed);
-                snprintf(key, sizeof(key), "ITLAWDLCoexProbe%uOffset", k);
+                snprintf(key, sizeof(key), "AwCoexProbe%uOffset", k);
                 root->setProperty(key, uint32_t(ps.entryOffset()), 32);
-                snprintf(key, sizeof(key), "ITLAWDLCoexProbe%uEawUS", k);
+                snprintf(key, sizeof(key), "AwCoexProbe%uEawUS", k);
                 root->setProperty(key, uint32_t(ps.eawUS), 32);
             }
-            root->setProperty("ITLAWDLCoexBaRefillFrames", awdlCoexBaRefillFrames, 32);
+            root->setProperty("AwCoexBaRefillFrames", awdlCoexBaRefillFrames, 32);
             if (awdlCoexBaTraceEnabled && awdlCoexBaTrace.count != awdlCoexBaTracePublished &&
                 (awdlCoexBaTrace.full() || awdlCoexBaTrace.count >= awdlCoexBaTracePublished + 256)) {
                 if (auto *trace = OSData::withBytes(&awdlCoexBaTrace, sizeof(awdlCoexBaTrace))) {
-                    root->setProperty("ITLAWDLBaTrace", trace);
+                    root->setProperty("AwBaTrace", trace);
                     awdlCoexBaTracePublished = awdlCoexBaTrace.count;
                     trace->release();
                 }
             }
-            root->setProperty("ITLAWDLCoexBaTxSinglesWithBacklog", awdlCoexBaTxSinglesWithBacklog, 32);
-            root->setProperty("ITLAWDLCoexVhtFrames", awdlCoexVhtFrames, 32);
-            root->setProperty("ITLAWDLCoexBaTxAggEnableStatus", awdlCoexBaTxAggEnableStatus, 32);
-            root->setProperty("ITLAWDLCoexPeerSyncFrames", awdlCoexPeerSyncFrames, 32);
-            root->setProperty("ITLAWDLCoexAwSyncFrames", awdlCoexAwSyncFrames, 32);
-            root->setProperty("ITLAWDLCoexIdleSyncFrames", awdlCoexIdleSyncFrames, 32);
-            root->setProperty("ITLAWDLCoexScheduleCalibrated", awdlCoexScheduleCalibrated);
-            root->setProperty("ITLAWDLCoexPeerSequenceRejected", awdlCoexPeerSequenceRejected, 32);
-            root->setProperty("ITLAWDLCoexPeerSequenceChanges", awdlCoexPeerSchedule.sequenceChanges, 32);
-            root->setProperty("ITLAWDLCoexPeerDecalibrations", awdlCoexPeerSchedule.decalibrations, 32);
-            root->setProperty("ITLAWDLCoexSvcMergedFrames", awdlServiceMergedFrames, 32);
-            root->setProperty("ITLAWDLCoexSvcMergedRecords", awdlServiceMergedRecords, 32);
-            root->setProperty("ITLAWDLCoexSvcMergeRefused", awdlServiceMergeRefused, 32);
-            root->setProperty("ITLAWDLCoexIntCoalescing", uint32_t(awdlIntCoalescing), 32);
+            root->setProperty("AwCoexBaTxSinglesWithBacklog", awdlCoexBaTxSinglesWithBacklog, 32);
+            root->setProperty("AwCoexVhtFrames", awdlCoexVhtFrames, 32);
+            root->setProperty("AwCoexBaTxAggEnableStatus", awdlCoexBaTxAggEnableStatus, 32);
+            root->setProperty("AwCoexPeerSyncFrames", awdlCoexPeerSyncFrames, 32);
+            root->setProperty("AwCoexAwSyncFrames", awdlCoexAwSyncFrames, 32);
+            root->setProperty("AwCoexIdleSyncFrames", awdlCoexIdleSyncFrames, 32);
+            root->setProperty("AwCoexScheduleCalibrated", awdlCoexScheduleCalibrated);
+            root->setProperty("AwCoexPeerSequenceRejected", awdlCoexPeerSequenceRejected, 32);
+            root->setProperty("AwCoexPeerSequenceChanges", awdlCoexPeerSchedule.sequenceChanges, 32);
+            root->setProperty("AwCoexPeerDecalibrations", awdlCoexPeerSchedule.decalibrations, 32);
+            root->setProperty("AwCoexSvcMergedFrames", awdlServiceMergedFrames, 32);
+            root->setProperty("AwCoexSvcMergedRecords", awdlServiceMergedRecords, 32);
+            root->setProperty("AwCoexSvcMergeRefused", awdlServiceMergeRefused, 32);
+            root->setProperty("AwCoexIntCoalescing", uint32_t(awdlIntCoalescing), 32);
             if (auto *reasons = OSData::withBytes(awdlCoexRejectReasons, sizeof(awdlCoexRejectReasons))) {
-                root->setProperty("ITLAWDLCoexRejectReasons", reasons);
+                root->setProperty("AwCoexRejectReasons", reasons);
                 reasons->release();
             }
-            root->setProperty("ITLAWDLCoexDataRxUcast", awdlCoexDataRxUcast, 32);
-            root->setProperty("ITLAWDLCoexDataRxGroup", awdlCoexDataRxGroup, 32);
-            root->setProperty("ITLAWDLCoexUcastOK", awdlCoexUcastOK, 32);
-            root->setProperty("ITLAWDLCoexUcastFailed", awdlCoexUcastFailed, 32);
-            root->setProperty("ITLAWDLCoexGroupOK", awdlCoexGroupOK, 32);
-            root->setProperty("ITLAWDLCoexGroupFailed", awdlCoexGroupFailed, 32);
-            root->setProperty("ITLAWDLCoexPromiscLive", awdlCoexPromiscLive);
-            root->setProperty("ITLAWDLCoexPromiscDropped", awdlCoexPromiscDropped, 32);
-            root->setProperty("ITLAWDLCoexPromiscUncertain", awdlCoexPromiscUncertain);
-            root->setProperty("ITLAWDLCoexPromiscAmbiguous", awdlCoexPromiscAmbiguous, 32);
+            root->setProperty("AwCoexDataRxUcast", awdlCoexDataRxUcast, 32);
+            root->setProperty("AwCoexDataRxGroup", awdlCoexDataRxGroup, 32);
+            root->setProperty("AwCoexUcastOK", awdlCoexUcastOK, 32);
+            root->setProperty("AwCoexUcastFailed", awdlCoexUcastFailed, 32);
+            root->setProperty("AwCoexGroupOK", awdlCoexGroupOK, 32);
+            root->setProperty("AwCoexGroupFailed", awdlCoexGroupFailed, 32);
+            root->setProperty("AwCoexPromiscLive", awdlCoexPromiscLive);
+            root->setProperty("AwCoexPromiscDropped", awdlCoexPromiscDropped, 32);
+            root->setProperty("AwCoexPromiscUncertain", awdlCoexPromiscUncertain);
+            root->setProperty("AwCoexPromiscAmbiguous", awdlCoexPromiscAmbiguous, 32);
             if (auto *masks = OSData::withBytes(awdlCoexMacMaskSeen, sizeof(awdlCoexMacMaskSeen))) {
-                root->setProperty("ITLAWDLCoexMacMaskSeen", masks);
+                root->setProperty("AwCoexMacMaskSeen", masks);
                 masks->release();
             }
-            root->setProperty("ITLAWDLCoexDataTx", awdlCoexDataTx, 32);
-            root->setProperty("ITLAWDLCoexDataTxErrors", awdlCoexDataTxErrors, 32);
-            root->setProperty("ITLAWDLCoexDataOK", awdlCoexDataOK, 32);
-            root->setProperty("ITLAWDLCoexDataFailed", awdlCoexDataFailed, 32);
-            root->setProperty("ITLAWDLCoexDataPumps", awdlCoexDataPumps, 32);
+            root->setProperty("AwCoexDataTx", awdlCoexDataTx, 32);
+            root->setProperty("AwCoexDataTxErrors", awdlCoexDataTxErrors, 32);
+            root->setProperty("AwCoexDataOK", awdlCoexDataOK, 32);
+            root->setProperty("AwCoexDataFailed", awdlCoexDataFailed, 32);
+            root->setProperty("AwCoexDataPumps", awdlCoexDataPumps, 32);
         }
-        root->setProperty("ITLAWDLCoexBroken", awdlCoexBrokenGeneration >= 0 && awdlCoexBrokenGeneration == awdlCoexGeneration);
+        root->setProperty("AwCoexBroken", awdlCoexBrokenGeneration >= 0 && awdlCoexBrokenGeneration == awdlCoexGeneration);
     }
     if (awdlCoexRx) {
-        root->setProperty("ITLAWDLCoexForwarded", awdlCoexForwarded, 32);
-        root->setProperty("ITLAWDLCoexZeroPadTrimmed", awdlCoexZeroPadTrimmed, 32);
-        root->setProperty("ITLAWDLCoexMultiState", awdlCoexMultiState);
+        root->setProperty("AwCoexForwarded", awdlCoexForwarded, 32);
+        root->setProperty("AwCoexZeroPadTrimmed", awdlCoexZeroPadTrimmed, 32);
+        root->setProperty("AwCoexMultiState", awdlCoexMultiState);
         // Listener start with no association: the channel the picker chose (low byte, 0x100 = 80 MHz), how
         // many times the attempt ran, and whether the add took. Pick 0 means it found no channel of its own
         // and the firmware was left alone.
-        root->setProperty("ITLAWDLCoexBootPick", awdlCoexBootPick, 32);
-        root->setProperty("ITLAWDLCoexBootTries", awdlCoexBootTries, 32);
-        root->setProperty("ITLAWDLCoexBootResult", awdlCoexBootResult, 32);
+        root->setProperty("AwCoexBootPick", awdlCoexBootPick, 32);
+        root->setProperty("AwCoexBootTries", awdlCoexBootTries, 32);
+        root->setProperty("AwCoexBootResult", awdlCoexBootResult, 32);
         // 0 reached the picker, 1 stopping, 2 no coexist probe, 3 not wanted, 4 already up, 5 no multi mode,
         // 6 radio in trouble, 7 state machine busy (joining), 8 a scan is on the air. BootState is ic_state as
         // the last attempt saw it (2 is SCAN, which is where an unassociated station sits).
-        root->setProperty("ITLAWDLCoexBootWhy", awdlCoexBootWhy, 32);
-        root->setProperty("ITLAWDLCoexBootState", awdlCoexBootState, 32);
-        root->setProperty("ITLAWDLCoexBootRearms", awdlCoexBootRearms, 32);
-        root->setProperty("ITLAWDLCoexPhyResult", awdlCoexPhyResult, 32);
-        root->setProperty("ITLAWDLCoexMultiBindResult", awdlCoexMultiBindResult, 32);
-        root->setProperty("ITLAWDLCoexOwnWidth", uint32_t(awdlCoexOwnWidth), 32);
-        root->setProperty("ITLAWDLCoexMoves", awdlCoexMoves, 32);
-        root->setProperty("ITLAWDLCoexMoveFailures", awdlCoexMoveFailures, 32);
-        root->setProperty("ITLAWDLCoexCountryNotices", awdlCoexCountryNotices, 32);
-        root->setProperty("ITLAWDLCoexCountryAnswers", awdlCoexCountryAnswers, 32);
-        root->setProperty("ITLAWDLCoexPassiveCleared", awdlCoexPassiveCleared, 32);
-        root->setProperty("ITLAWDLCoexCountryLastStatus", awdlCoexCountryLastStatus, 32);
-        root->setProperty("ITLAWDLCoexCountryLearned", awdlCoexCountryLearned);
-        root->setProperty("ITLAWDLCoexBeaconHints", awdlCoexBeaconHints, 32);
-        root->setProperty("ITLAWDLCoexScanListenerPauses", awdlScanListenerPauses, 32);
-        root->setProperty("ITLAWDLCoexScanListenerResumes", awdlScanListenerResumes, 32);
-        root->setProperty("ITLAWDLCoexScanListenerResumeFails", awdlScanListenerResumeFails, 32);
-        root->setProperty("ITLAWDLCoexScanListenerBusySkips", awdlScanListenerBusySkips, 32);
-        root->setProperty("ITLAWDLCoexScanListenerLiveSkips", awdlScanListenerLiveSkips, 32);
+        root->setProperty("AwCoexBootWhy", awdlCoexBootWhy, 32);
+        root->setProperty("AwCoexBootState", awdlCoexBootState, 32);
+        root->setProperty("AwCoexBootRearms", awdlCoexBootRearms, 32);
+        root->setProperty("AwCoexPhyResult", awdlCoexPhyResult, 32);
+        root->setProperty("AwCoexMultiBindResult", awdlCoexMultiBindResult, 32);
+        root->setProperty("AwCoexOwnWidth", uint32_t(awdlCoexOwnWidth), 32);
+        root->setProperty("AwCoexMoves", awdlCoexMoves, 32);
+        root->setProperty("AwCoexMoveFailures", awdlCoexMoveFailures, 32);
+        root->setProperty("AwCoexCountryNotices", awdlCoexCountryNotices, 32);
+        root->setProperty("AwCoexCountryAnswers", awdlCoexCountryAnswers, 32);
+        root->setProperty("AwCoexPassiveCleared", awdlCoexPassiveCleared, 32);
+        root->setProperty("AwCoexCountryLastStatus", awdlCoexCountryLastStatus, 32);
+        root->setProperty("AwCoexCountryLearned", awdlCoexCountryLearned);
+        root->setProperty("AwCoexBeaconHints", awdlCoexBeaconHints, 32);
+        root->setProperty("AwCoexScanListenerPauses", awdlScanListenerPauses, 32);
+        root->setProperty("AwCoexScanListenerResumes", awdlScanListenerResumes, 32);
+        root->setProperty("AwCoexScanListenerResumeFails", awdlScanListenerResumeFails, 32);
+        root->setProperty("AwCoexScanListenerBusySkips", awdlScanListenerBusySkips, 32);
+        root->setProperty("AwCoexScanListenerLiveSkips", awdlScanListenerLiveSkips, 32);
         // Sweeps handed over to the boot task, and how many asks that took. Defers > 0 with BootWhy 0 and
         // Adds 2 is the whole point of the change; Defers 0 with BootWhy stuck at 8 means the yield never
         // reached next_scan.
-        root->setProperty("ITLAWDLCoexScanYieldAsks", awdlCoexScanYieldTries, 32);
-        root->setProperty("ITLAWDLCoexScanYieldDefers", awdlCoexScanYieldDefers, 32);
-        root->setProperty("ITLAWDLCoexScanYieldResumes", awdlCoexScanYieldResumes, 32);
-        root->setProperty("ITLAWDLCoexScanHolds", awdlCoexScanHolds, 32);
-        root->setProperty("ITLAWDLCoexScanHoldEnds", awdlCoexScanHoldEnds, 32);
-        root->setProperty("ITLAWDLCoexScanPasses", awdlCoexScanPasses, 32);
-        root->setProperty("ITLAWDLCoexScanHoldPushes", awdlCoexScanHoldPushes, 32);
-        root->setProperty("ITLAWDLCoexRestations", awdlCoexRestations, 32);
-        root->setProperty("ITLAWDLCoexDataFPS", awdlCoexDataFrameRate, 32);
-        root->setProperty("ITLAWDLCoexScanPark", awdlCoexScanPark);
-        root->setProperty("ITLAWDLCoexScanHoldMode", awdlCoexScanHold);
-        root->setProperty("ITLAWDLCoexCountryFailures", awdlCoexCountryFailures, 32);
-        root->setProperty("ITLAWDLCoexMoveDrainTimeouts", awdlCoexMoveDrainTimeouts, 32);
-        root->setProperty("ITLAWDLCoexMovePending", awdlCoexMovePending);
-        root->setProperty("ITLAWDLCoexForwardRefused", awdlCoexForwardRefused, 32);
-        root->setProperty("ITLAWDLCoexForwardMalformed", awdlCoexForwardMalformed, 32);
+        root->setProperty("AwCoexScanYieldAsks", awdlCoexScanYieldTries, 32);
+        root->setProperty("AwCoexScanYieldDefers", awdlCoexScanYieldDefers, 32);
+        root->setProperty("AwCoexScanYieldResumes", awdlCoexScanYieldResumes, 32);
+        root->setProperty("AwCoexScanHolds", awdlCoexScanHolds, 32);
+        root->setProperty("AwCoexScanHoldEnds", awdlCoexScanHoldEnds, 32);
+        root->setProperty("AwCoexScanPasses", awdlCoexScanPasses, 32);
+        root->setProperty("AwCoexScanHoldPushes", awdlCoexScanHoldPushes, 32);
+        root->setProperty("AwCoexRestations", awdlCoexRestations, 32);
+        root->setProperty("AwCoexDataFPS", awdlCoexDataFrameRate, 32);
+        root->setProperty("AwCoexScanPark", awdlCoexScanPark);
+        root->setProperty("AwCoexScanHoldMode", awdlCoexScanHold);
+        root->setProperty("AwCoexCountryFailures", awdlCoexCountryFailures, 32);
+        root->setProperty("AwCoexMoveDrainTimeouts", awdlCoexMoveDrainTimeouts, 32);
+        root->setProperty("AwCoexMovePending", awdlCoexMovePending);
+        root->setProperty("AwCoexForwardRefused", awdlCoexForwardRefused, 32);
+        root->setProperty("AwCoexForwardMalformed", awdlCoexForwardMalformed, 32);
     }
-    root->setProperty("ITLAWDLCoexReclaimRefused", awdlReclaimRefused, 32);
+    root->setProperty("AwCoexReclaimRefused", awdlReclaimRefused, 32);
 }
 // The firmware recognises acknowledgements only to the address in its MAC context. If setting our AWDL
 // address there fails, or macOS changes the address, every unicast frame looks unacknowledged: on
@@ -7248,7 +7248,7 @@ static uint32_t awdlMacApplies, awdlMacApplyFailures, awdlMacAddressChanges;
 static uint8_t awdlOwnAddress[6];
 static bool awdlPeerEverHeard;
 static uint64_t awdlPeerLastHeardUS;
-static ItlAWDL::ObservedCounts awdlSeen;
+static Aw::ObservedCounts awdlSeen;
 // -itlmccprobe: record what the firmware says about its regulatory domain. Read-only.
 static bool mccProbe;
 static CTimeout *mccProbeTimer;
@@ -7258,22 +7258,22 @@ static bool awdlCountryDiscovery, awdlCountryScanDone, awdlCountryNoticeSeen, aw
 static uint16_t awdlCountryNotice, awdlCountryLastAnswered;
 static uint8_t awdlCountryNoticeSource;
 static uint32_t awdlCountryScans, awdlCountryNotices, awdlCountryAnswers, awdlCountryLastStatus, awdlCountryAnswerSeconds;
-static ItlAWDL::BeaconCountry awdlBeaconCountries[32];
+static Aw::BeaconCountry awdlBeaconCountries[32];
 static unsigned awdlBeaconCountryCount;
 static uint32_t awdlBeaconCountryOverflow;
 // -itlawdlpeercctest: read a peer's stated country, ask the firmware once, record the reply.
 static bool awdlPeerCountryTest, awdlPeerCountryAsked;
-static ItlAWDL::PeerCountryState awdlPeerCountry;
+static Aw::PeerCountryState awdlPeerCountry;
 static uint32_t awdlPeerCountryFrames, awdlPeerCountryAskSeconds, awdlPeerCountryReads;
 // How the phone divides its time, and how the Mac's sends spend theirs.
-struct AWDLSlotChange { uint32_t uptimeMs; ItlAWDL::PeerSlots slots; uint16_t reserved; };
+struct AWDLSlotChange { uint32_t uptimeMs; Aw::PeerSlots slots; uint16_t reserved; };
 static AWDLSlotChange awdlSlotChanges[128];
 static unsigned awdlSlotChangeCount;
-static ItlAWDL::PeerSlots awdlLastSlots;
+static Aw::PeerSlots awdlLastSlots;
 static bool awdlHaveSlots;
 static uint32_t awdlSlots6Frames[17];
 static uint32_t awdlFlightOK[10], awdlFlightFail[10];
-static ItlAWDL::TxServiceStats awdlTxService;
+static Aw::TxServiceStats awdlTxService;
 static uint32_t awdlTxWindowFullExits, awdlTxStackEmptyExits;
 static uint32_t awdlRxFromPeer;  // Every frame whose transmitter is the last peer heard.
 static bool awdlRadioProbe;
@@ -7294,14 +7294,14 @@ static void awdlNoteRadioStatistics(const Statistics &stats)
 }
 
 static uint32_t awdlRxAllFrames; // Every frame received, never reset.
-static ItlAWDL::TxTrace awdlTxTrace;
+static Aw::TxTrace awdlTxTrace;
 static uint32_t awdlTxTracePublished;
-static ItlAWDL::BaTrace awdlBaTrace;
+static Aw::BaTrace awdlBaTrace;
 static uint32_t awdlBaTracePublished;
 // The peer's schedule is always tracked (it only counts); -itlawdlpeerpause acts on it.
-static ItlAWDL::PeerSchedule awdlPeerSchedule;
-static ItlAWDL::PeerPauseState awdlPeerPauseState;
-static ItlAWDL::PeerBulkState awdlPeerBulk;
+static Aw::PeerSchedule awdlPeerSchedule;
+static Aw::PeerPauseState awdlPeerPauseState;
+static Aw::PeerBulkState awdlPeerBulk;
 static bool awdlPeerPause;
 // -itlawdlawsync: also send a sync or service frame at the start of the peer's AWs in its entries on our
 // channel, where an idle peer is awake, so it finds us and our records sooner. At most one per 8 ms.
@@ -7312,11 +7312,11 @@ static uint32_t awdlPeerSyncFrames;
 static uint64_t awdlSubmitUS, awdlFlightSumUS, awdlIdleSumUS, awdlLastDoneUS;
 // itlawdlwindow=N: up to N unicast frames in flight. At 1, the single-frame path runs as before.
 static unsigned awdlWindow = 1;
-static ItlAWDL::TxBurst awdlBurst;
+static Aw::TxBurst awdlBurst;
 static mbuf_t awdlDeferredMulticast;
 // itlawdlmcastrepeat=N: each group frame goes N times in all, 64 TU apart. Needs a window above 1.
 static unsigned awdlMulticastCopies = 1;
-static ItlAWDL::MulticastRepeats awdlMulticastRepeats;
+static Aw::MulticastRepeats awdlMulticastRepeats;
 static uint32_t awdlMulticastRepeatsSent;
 static bool awdlBurstSending;
 // What the send path looked like when it stopped, so a hang can be read afterwards.
@@ -7330,7 +7330,7 @@ static uint64_t awdlTxBusySinceUS, awdlTxLastCompletionUS;
 static uint32_t awdlTxLastIndex, awdlTxLastStatus;
 static bool awdlBackgroundScan, awdlBackgroundScanActive;
 static uint64_t awdlBackgroundScanStartUS;
-static ItlAWDL::ChannelMoveState awdlChannelMove;
+static Aw::ChannelMoveState awdlChannelMove;
 static uint32_t awdlBackgroundScans, awdlMovesUp, awdlMovesDown;
 static unsigned awdlMoveTestSeconds;
 static bool awdlMoveTestDone;
@@ -7339,8 +7339,8 @@ static bool awdlMoveTestDone;
 // boot, because a firmware that faults on it would fault again each time the peer repeats itself.
 constexpr uint32_t kAwdlBaAttemptsMax = 3;
 static bool awdlBaProbe, awdlBaPending, awdlBaPeerKnown, awdlBaStationAdded, awdlBaFailed, awdlBaResponseInFlight;
-static ItlAWDL::AddbaRequest awdlBaRequest;
-static uint8_t awdlBaPeer[6], awdlBaResponse[ItlAWDL::kAddbaResponseLength];
+static Aw::AddbaRequest awdlBaRequest;
+static uint8_t awdlBaPeer[6], awdlBaResponse[Aw::kAddbaResponseLength];
 static size_t awdlBaResponseLength;
 static int awdlBaGeneration;
 static uint16_t awdlBaSequence, awdlRxPhyInfo;
@@ -7350,7 +7350,7 @@ static uint32_t awdlBaResponsesSent, awdlBaResponsesAcked, awdlBaResponseLastSta
 static uint32_t awdlBaAttempts, awdlBaOffChannel, awdlBaResponsesDone, awdlBaResponsesRefused, awdlBaBarReleases;
 static uint32_t awdlBaRxDelba, awdlBaSessionRestarts;
 static uint8_t awdlBaTidToken[8];
-static ItlAWDL::RxSequenceTracker awdlRxSequences;
+static Aw::RxSequenceTracker awdlRxSequences;
 // The BSSID in the peer's request. The context otherwise carries the broadcast address.
 static uint8_t awdlBaBssid[6];
 static uint32_t awdlBaBssidResult, awdlRxNoFcs;
@@ -7366,7 +7366,7 @@ static bool awdlBaFilterKeepOff;
 // The filter stays on until the peer acknowledges an answer, and after that it's only off while
 // data is arriving. Off before that, a send never starts.
 static bool awdlBaPeerAccepted, awdlBaFilterOff;
-static ItlAWDL::BaFilterState awdlBaFilter;
+static Aw::BaFilterState awdlBaFilter;
 static uint32_t awdlBaFilterChanges;
 // -itlawdlbatx: send A-MPDUs to the peer. Its own firmware queue and firmware rate control, an
 // ADDBA request, then file data goes there. Sending stays on the monitor queue until the peer
@@ -7400,7 +7400,7 @@ static int awdlBaTxQueue = -1;
 static uint32_t awdlBaTxState, awdlBaTxAsks, awdlBaTxAnswerStatus = 0xffffffffU, awdlBaTxQueueResult;
 static uint32_t awdlBaTxFrames, awdlBaTxNotifs, awdlBaTxSentAir, awdlBaTxAcked, awdlBaTxDelba, awdlBaTxRefused, awdlBaTxSingles;
 static uint16_t awdlBaTxSequence;
-static ItlAWDL::BaTxBulkState awdlBaTxBulk;
+static Aw::BaTxBulkState awdlBaTxBulk;
 static uint32_t awdlBaTxBulkChanges, awdlBaTxBulkSkipped;
 static uint8_t awdlBaTxToken;
 static uint64_t awdlBaTxLastAskUS;
@@ -7420,9 +7420,9 @@ static uint16_t mccEchoCountry;
 static uint8_t mccEchoSource;
 // Set before attach, from the card's ACPI WRDD method. The laptop maker's value.
 void itlMccSetBiosCountry(uint16_t country) { mccBiosCountry = country; }
-static ItlAWDL::MccSample mccSamples[96];
+static Aw::MccSample mccSamples[96];
 static unsigned mccSampleCount;
-static ItlAWDL::MccNotice mccNotices[16];
+static Aw::MccNotice mccNotices[16];
 static unsigned mccNoticeCount;
 static uint32_t mccUptimeSeconds()
 {
@@ -7445,7 +7445,7 @@ static void mccProbePublish()
     root->setProperty("ITLMCCNoticeTotal", mccNoticeTotal, 32);
     root->setProperty("ITLMCCNoticeLastSeconds", mccNoticeLastSeconds, 32);
 }
-static ItlAWDL::DataSkipCounts awdlDataSkips;
+static Aw::DataSkipCounts awdlDataSkips;
 static unsigned awdlRxIndex;
 static bool awdlRxBurstDone;
 static struct {
@@ -7467,7 +7467,7 @@ static uint64_t awdlUptimeUS()
 
 static bool awdlPeerAudible()
 {
-    return ItlAWDL::peerRecentlyHeard(awdlPeerEverHeard, awdlUptimeUS(), awdlPeerLastHeardUS);
+    return Aw::peerRecentlyHeard(awdlPeerEverHeard, awdlUptimeUS(), awdlPeerLastHeardUS);
 }
 
 // Bounded to one short sample per key, kept only in this machine's I/O Registry.
@@ -7495,7 +7495,7 @@ awdlRxObserve(struct iwx_softc *sc, mbuf_t m, int chanidx, int rssi, uint32_t ti
     
     awdlRxStat.all++;
     ++awdlRxAllFrames;
-    if (len >= 16 && ItlAWDL::knownAddress(awdlLastPeer) && ItlAWDL::sameAddress(f + 10, awdlLastPeer)) {
+    if (len >= 16 && Aw::knownAddress(awdlLastPeer) && Aw::sameAddress(f + 10, awdlLastPeer)) {
         ++awdlRxFromPeer;
         const uint64_t peerNowUS = awdlUptimeUS();
         awdlTxTrace.notePeerFrame(peerNowUS);
@@ -7505,36 +7505,36 @@ awdlRxObserve(struct iwx_softc *sc, mbuf_t m, int chanidx, int rssi, uint32_t ti
         if (f[0] == 0x80) {
             ++awdlRadioBeacons[chanidx];
         } else if ((f[0] & 0x0c) == 0x08 &&
-                   !ItlAWDL::sameAddress(f + 10, awdlLastPeer) &&
-                   !ItlAWDL::sameAddress(f + 10, awdlOwnAddress) &&
-                   !ItlAWDL::sameAddress(f + 10, sc->sc_ic.ic_myaddr)) {
+                   !Aw::sameAddress(f + 10, awdlLastPeer) &&
+                   !Aw::sameAddress(f + 10, awdlOwnAddress) &&
+                   !Aw::sameAddress(f + 10, sc->sc_ic.ic_myaddr)) {
             ++awdlRadioOtherData[chanidx];
         }
     }
     awdlRxStat.lastChan = chanidx;
     awdlRxStat.lastRssi = rssi;
-    ItlAWDL::observeAir(awdlAir, f, len, awdlOwnAddress, sc->sc_ic.ic_myaddr);
+    Aw::observeAir(awdlAir, f, len, awdlOwnAddress, sc->sc_ic.ic_myaddr);
     if ((awdlCountryDiscovery || awdlBackgroundScanActive) && !mbuf_next(m)) {
         uint8_t advertised[2];
-        if (ItlAWDL::beaconCountry(f, len, advertised))
-            ItlAWDL::noteBeaconCountry(awdlBeaconCountries, nitems(awdlBeaconCountries), awdlBeaconCountryCount,
+        if (Aw::beaconCountry(f, len, advertised))
+            Aw::noteBeaconCountry(awdlBeaconCountries, nitems(awdlBeaconCountries), awdlBeaconCountryCount,
                                        awdlBeaconCountryOverflow, advertised, uint8_t(chanidx));
     }
     // Identify the action frames addressed to us that aren't AWDL's own format.
-    if (len >= 26 && f[0] == 0xd0 && ItlAWDL::knownAddress(awdlOwnAddress) &&
-        ItlAWDL::sameAddress(f + 4, awdlOwnAddress) && f[24] != 0x7f) {
-        awdlKeepSample("ITLAWDLSampleActionToUs", f, len);
-        ItlAWDL::AddbaAnswer answer;
-        if (awdlBaTx && awdlBaTxState == kBaTxAsking && ItlAWDL::parseAddbaAnswer(f, len, awdlOwnAddress, &answer) &&
-            answer.token == awdlBaTxToken && answer.tid == kAwdlBaTxTid && ItlAWDL::sameAddress(f + 10, awdlBaPeer)) {
+    if (len >= 26 && f[0] == 0xd0 && Aw::knownAddress(awdlOwnAddress) &&
+        Aw::sameAddress(f + 4, awdlOwnAddress) && f[24] != 0x7f) {
+        awdlKeepSample("AwSampleActionToUs", f, len);
+        Aw::AddbaAnswer answer;
+        if (awdlBaTx && awdlBaTxState == kBaTxAsking && Aw::parseAddbaAnswer(f, len, awdlOwnAddress, &answer) &&
+            answer.token == awdlBaTxToken && answer.tid == kAwdlBaTxTid && Aw::sameAddress(f + 10, awdlBaPeer)) {
             awdlBaTxAnswerStatus = answer.status;
             awdlBaTxState = answer.status ? kBaTxFailed : kBaTxAgreed;
             awdlSessLog("mac tx session answer status %u window %u\n", unsigned(answer.status), unsigned(answer.window));
         }
         bool delbaPeerWasSender = false;
         uint8_t delbaTid = 0;
-        if (awdlBaProbe && ItlAWDL::parseDelba(f, len, awdlOwnAddress, &delbaPeerWasSender, &delbaTid) &&
-            ItlAWDL::sameAddress(f + 10, awdlBaPeer)) {
+        if (awdlBaProbe && Aw::parseDelba(f, len, awdlOwnAddress, &delbaPeerWasSender, &delbaTid) &&
+            Aw::sameAddress(f + 10, awdlBaPeer)) {
             awdlSessLog("phone delba tid %u (%s)\n", unsigned(delbaTid), delbaPeerWasSender ? "its sending" : "our sending");
             if (delbaPeerWasSender) {
                 ++awdlBaRxDelba;
@@ -7547,12 +7547,12 @@ awdlRxObserve(struct iwx_softc *sc, mbuf_t m, int chanidx, int rssi, uint32_t ti
                 awdlBaTxState = awdlBaTxDelba > kAwdlBaTxDelbaMax ? kBaTxFailed : kBaTxAsking;
             }
         }
-        ItlAWDL::AddbaRequest request;
-        if (awdlBaProbe && ItlAWDL::parseAddbaRequest(f, len, awdlOwnAddress, &request)) {
+        Aw::AddbaRequest request;
+        if (awdlBaProbe && Aw::parseAddbaRequest(f, len, awdlOwnAddress, &request)) {
             ++awdlBaRequests;
             awdlSessLog("phone addba token %u tid %u ssn %u window %u\n", unsigned(request.token), unsigned(request.tid),
                         unsigned(request.ssn), unsigned(request.window));
-            if (awdlBaPeerKnown && awdlBaGeneration == sc->sc_generation && !ItlAWDL::sameAddress(awdlBaPeer, request.peer)) {
+            if (awdlBaPeerKnown && awdlBaGeneration == sc->sc_generation && !Aw::sameAddress(awdlBaPeer, request.peer)) {
                 ++awdlBaOtherPeer;
             } else {
                 awdlBaRequest = request;
@@ -7561,63 +7561,63 @@ awdlRxObserve(struct iwx_softc *sc, mbuf_t m, int chanidx, int rssi, uint32_t ti
         }
     }
     // Read-only accounting of data frames to us that don't become IPv6 packets.
-    const bool dataToOwn = len >= 28 && (f[0] & 0x0c) == 8 && ItlAWDL::knownAddress(awdlOwnAddress) &&
-        ItlAWDL::sameAddress(f + 4, awdlOwnAddress);
+    const bool dataToOwn = len >= 28 && (f[0] & 0x0c) == 8 && Aw::knownAddress(awdlOwnAddress) &&
+        Aw::sameAddress(f + 4, awdlOwnAddress);
     if (dataToOwn && mbuf_next(m)) {
-        ItlAWDL::noteDataSkip(awdlDataSkips, ItlAWDL::DataSkip::Chained, f, mbuf_pkthdr_len(m));
-        awdlKeepSample("ITLAWDLSampleSkipChained", f, MIN(len, size_t(48)));
+        Aw::noteDataSkip(awdlDataSkips, Aw::DataSkip::Chained, f, mbuf_pkthdr_len(m));
+        awdlKeepSample("AwSampleSkipChained", f, MIN(len, size_t(48)));
     }
     if (len >= 24 && (f[0] & 0x0c) == 8 && !mbuf_next(m)) {
-        ItlAWDL::DataFrameView data;
-        auto parsed = ItlAWDL::parseDataFrame(f, len, true, &data);
+        Aw::DataFrameView data;
+        auto parsed = Aw::parseDataFrame(f, len, true, &data);
         // With the promiscuous filter off, the firmware may leave off the FCS. The parser never
         // reads those 4 bytes, so a longer length here only stops it from trimming real data.
         size_t capture = len;
         // Trimming 4 bytes reads as Malformed on a plain frame, and as Unsupported on one with
         // the outer header, whose length field no longer matches. Those carry the file data.
-        if (awdlBaNoPromisc && (parsed == ItlAWDL::ParseResult::Malformed || parsed == ItlAWDL::ParseResult::Unsupported) &&
-            ItlAWDL::parseDataFrame(f, len, false, &data) == ItlAWDL::ParseResult::Valid) {
+        if (awdlBaNoPromisc && (parsed == Aw::ParseResult::Malformed || parsed == Aw::ParseResult::Unsupported) &&
+            Aw::parseDataFrame(f, len, false, &data) == Aw::ParseResult::Valid) {
             capture = len + 4;
-            parsed = ItlAWDL::ParseResult::Valid;
+            parsed = Aw::ParseResult::Valid;
             ++awdlRxNoFcs;
         }
-        if (parsed == ItlAWDL::ParseResult::Malformed)
-            awdlKeepSample("ITLAWDLSampleMalformed", f, MIN(len, size_t(96)));
+        if (parsed == Aw::ParseResult::Malformed)
+            awdlKeepSample("AwSampleMalformed", f, MIN(len, size_t(96)));
         if (dataToOwn) {
-            const auto skip = ItlAWDL::dataSkipReason(f, capture, false, parsed);
-            ItlAWDL::noteDataSkip(awdlDataSkips, skip, f, len);
-            if (skip == ItlAWDL::DataSkip::Bssid)
-                awdlKeepSample("ITLAWDLSampleSkipBssid", f, MIN(len, size_t(48)));
-            else if (skip == ItlAWDL::DataSkip::Llc)
-                awdlKeepSample("ITLAWDLSampleSkipLlc", f, MIN(len, size_t(48)));
-            else if (skip == ItlAWDL::DataSkip::FrameType)
-                awdlKeepSample("ITLAWDLSampleSkipType", f, MIN(len, size_t(48)));
-            else if (parsed == ItlAWDL::ParseResult::Unsupported)
-                awdlKeepSample("ITLAWDLSampleUnsupported", f, MIN(len, size_t(48)));
-            if (parsed == ItlAWDL::ParseResult::Valid) {
+            const auto skip = Aw::dataSkipReason(f, capture, false, parsed);
+            Aw::noteDataSkip(awdlDataSkips, skip, f, len);
+            if (skip == Aw::DataSkip::Bssid)
+                awdlKeepSample("AwSampleSkipBssid", f, MIN(len, size_t(48)));
+            else if (skip == Aw::DataSkip::Llc)
+                awdlKeepSample("AwSampleSkipLlc", f, MIN(len, size_t(48)));
+            else if (skip == Aw::DataSkip::FrameType)
+                awdlKeepSample("AwSampleSkipType", f, MIN(len, size_t(48)));
+            else if (parsed == Aw::ParseResult::Unsupported)
+                awdlKeepSample("AwSampleUnsupported", f, MIN(len, size_t(48)));
+            if (parsed == Aw::ParseResult::Valid) {
                 // A reply will follow, so don't leave it waiting on the idle poll.
                 awdlDataEverActive = true;
                 awdlLastDataUS = awdlUptimeUS();
-                ++awdlDataSkips.parsedLengths[ItlAWDL::dataLengthBin(len)];
+                ++awdlDataSkips.parsedLengths[Aw::dataLengthBin(len)];
                 const size_t header = f[0] == 0x88 ? 26 : 24;
-                if (ItlAWDL::hasOuterDataHeader(f + header, len - header))
+                if (Aw::hasOuterDataHeader(f + header, len - header))
                     ++awdlDataSkips.outerHeader;
             }
         }
-        if (parsed == ItlAWDL::ParseResult::Valid) {
+        if (parsed == Aw::ParseResult::Valid) {
             ++awdlRxStat.dataIPv6;
-            ItlAWDL::observeData(awdlSeen, data, awdlOwnAddress);
+            Aw::observeData(awdlSeen, data, awdlOwnAddress);
             // Prefer the address a peer actually uses over deriving one from its MAC.
             if (data.ip.bytes[8] == 0xfe && data.ip.bytes[9] == 0x80) {
                 memcpy(awdlLearnedPeer, data.source, sizeof(awdlLearnedPeer));
                 memcpy(awdlLearnedPeerIP, data.ip.bytes + 8, sizeof(awdlLearnedPeerIP));
             }
-#if defined(ITL_AWDL_NATIVE)
+#if defined(AW_NATIVE)
             itlAWDLObserveData(container_of(sc, ItlIwx, com)->getController(), f, capture);
 #endif
         }
-        else if (parsed == ItlAWDL::ParseResult::Malformed) ++awdlRxStat.dataMalformed;
-        else if (parsed == ItlAWDL::ParseResult::Unsupported) ++awdlRxStat.dataUnsupported;
+        else if (parsed == Aw::ParseResult::Malformed) ++awdlRxStat.dataMalformed;
+        else if (parsed == Aw::ParseResult::Unsupported) ++awdlRxStat.dataUnsupported;
         // Do not admit peers, deliver data or change the borrowed Intel mbuf.
     }
     if (len < 24 || (f[0] & 0x0c) != 0)
@@ -7625,14 +7625,14 @@ awdlRxObserve(struct iwx_softc *sc, mbuf_t m, int chanidx, int rssi, uint32_t ti
     awdlRxStat.mgmt++;
     if (f[0] == 0x80)
         awdlRxStat.beacon++;
-    ItlAWDL::ActionFrame decoded;
+    Aw::ActionFrame decoded;
     // Monitor MAC context enables IWX_MAC_FILTER_IN_CRC32, so the capture
     // includes four FCS bytes. Keep the borrowed mbuf intact for normal RX.
     size_t frameLength = 0;
-    const auto result = ItlAWDL::parseCapturedAction(f, len, true, &decoded, &frameLength);
-    if (result == ItlAWDL::ParseResult::NotAWDL)
+    const auto result = Aw::parseCapturedAction(f, len, true, &decoded, &frameLength);
+    if (result == Aw::ParseResult::NotAWDL)
         return;
-    if (result != ItlAWDL::ParseResult::Valid) {
+    if (result != Aw::ParseResult::Valid) {
         ++awdlRxStat.syncInvalid;
         if (awdlRxStat.rejectedLogged++ < 8)
             awdlLog("rejected ch %d result %u captured %u flags %02x frag %u version %u subtype %u\n",
@@ -7640,13 +7640,13 @@ awdlRxObserve(struct iwx_softc *sc, mbuf_t m, int chanidx, int rssi, uint32_t ti
                     f[1], f[22] & 0x0f, len > 33 ? f[29] : 0xff, len > 34 ? f[30] : 0xff);
         return;
     }
-#if defined(ITL_AWDL_NATIVE)
+#if defined(AW_NATIVE)
     // The borrowed Intel mbuf stays in the normal RX path. The receiver makes
     // an owned copy into an Apple pool buffer before invoking the peer engine.
     // rxi_rssi is dBm normalized by IWX_MIN_DBM; the native stack expects dBm.
     // -itlawdlnopsf: a peer's sync frames carry no services, and handing them up seems to make
     // the native stack drop the peer's services until its next MIF, so they stay here.
-    const bool fromOwn = ItlAWDL::knownAddress(awdlOwnAddress) && ItlAWDL::sameAddress(f + 10, awdlOwnAddress);
+    const bool fromOwn = Aw::knownAddress(awdlOwnAddress) && Aw::sameAddress(f + 10, awdlOwnAddress);
     if (awdlServiceMerge && !fromOwn) {
         const uint32_t resetsBefore = awdlServiceCache.resets;
         const uint16_t suiBefore = awdlServiceCache.sui;
@@ -7665,7 +7665,7 @@ awdlRxObserve(struct iwx_softc *sc, mbuf_t m, int chanidx, int rssi, uint32_t ti
             unsigned added = 0;
             mbuf_t merged = nullptr;
             if (!mbuf_getpacket(MBUF_DONTWAIT, &merged) && merged && mbuf_maxlen(merged) > frameLength + 4) {
-                const size_t room = MIN(size_t(mbuf_maxlen(merged)) - 4, ItlAWDL::kServiceMergeFrameMax);
+                const size_t room = MIN(size_t(mbuf_maxlen(merged)) - 4, Aw::kServiceMergeFrameMax);
                 const size_t n = awdlServiceCache.merge(f + 10, f, frameLength, static_cast<uint8_t *>(mbuf_data(merged)), room, &added);
                 if (n) {
                     // The hand-off expects the 4 FCS bytes after the frame, as from the radio.
@@ -7694,9 +7694,9 @@ awdlRxObserve(struct iwx_softc *sc, mbuf_t m, int chanidx, int rssi, uint32_t ti
     if (decoded.hasSync)
         ++awdlRxStat.syncValid;
     const uint8_t subtype = decoded.subtype;
-    const bool isOwn = ItlAWDL::knownAddress(awdlOwnAddress) && ItlAWDL::sameAddress(f + 10, awdlOwnAddress);
-    if (ItlAWDL::observeAction(awdlSeen, f, frameLength, awdlOwnAddress)) {
-        awdlKeepSample("ITLAWDLSampleMention", f, frameLength);
+    const bool isOwn = Aw::knownAddress(awdlOwnAddress) && Aw::sameAddress(f + 10, awdlOwnAddress);
+    if (Aw::observeAction(awdlSeen, f, frameLength, awdlOwnAddress)) {
+        awdlKeepSample("AwSampleMention", f, frameLength);
         if (awdlSeen.actionMentions == 1)
             awdlLog("first peer frame carrying our address: ch %d subtype %u rssi %d\n", chanidx, subtype, rssi);
     }
@@ -7709,17 +7709,17 @@ awdlRxObserve(struct iwx_softc *sc, mbuf_t m, int chanidx, int rssi, uint32_t ti
         awdlPeerLastHeardUS = heardNowUS;
         memcpy(awdlLastPeer, f + 10, sizeof(awdlLastPeer));
         awdlLastPeerRssi = rssi;
-        awdlKeepSample(subtype == 0 ? "ITLAWDLSamplePSF" : "ITLAWDLSampleMIF", f, frameLength);
-        ItlAWDL::countActionTLVs(awdlPeerTLVs, f, frameLength);
+        awdlKeepSample(subtype == 0 ? "AwSamplePSF" : "AwSampleMIF", f, frameLength);
+        Aw::countActionTLVs(awdlPeerTLVs, f, frameLength);
         awdlNoteServices(f, frameLength, true);
-        ItlAWDL::PeerSyncInfo peerSync{};
-        if (ItlAWDL::knownAddress(awdlBaPeer) && ItlAWDL::sameAddress(f + 10, awdlBaPeer) &&
-            ItlAWDL::peerSyncFromAction(f, frameLength, &peerSync)) {
+        Aw::PeerSyncInfo peerSync{};
+        if (Aw::knownAddress(awdlBaPeer) && Aw::sameAddress(f + 10, awdlBaPeer) &&
+            Aw::peerSyncFromAction(f, frameLength, &peerSync)) {
             awdlPeerSchedule.note(peerSync, awdlUptimeUS(), uint8_t(awdlFixedChannel));
             ++awdlPeerSyncFrames;
         }
-        ItlAWDL::PeerSlots slots{};
-        if (ItlAWDL::peerSlotsFromAction(f, frameLength, &slots)) {
+        Aw::PeerSlots slots{};
+        if (Aw::peerSlotsFromAction(f, frameLength, &slots)) {
             ++awdlSlots6Frames[MIN(slots.channel6, uint8_t(16))];
             if (!awdlHaveSlots || memcmp(&slots, &awdlLastSlots, sizeof(slots))) {
                 awdlHaveSlots = true;
@@ -7729,9 +7729,9 @@ awdlRxObserve(struct iwx_softc *sc, mbuf_t m, int chanidx, int rssi, uint32_t ti
             }
         }
         uint16_t statedCountry = 0;
-        if (awdlPeerCountryTest && ItlAWDL::peerCountryFromAction(f, frameLength, &statedCountry)) {
+        if (awdlPeerCountryTest && Aw::peerCountryFromAction(f, frameLength, &statedCountry)) {
             ++awdlPeerCountryFrames;
-            ItlAWDL::notePeerCountry(awdlPeerCountry, statedCountry);
+            Aw::notePeerCountry(awdlPeerCountry, statedCountry);
         }
         // The first frame of a kind can be much smaller than the ones carrying services.
         const unsigned kind = subtype == 0 ? 0 : 1;
@@ -7739,7 +7739,7 @@ awdlRxObserve(struct iwx_softc *sc, mbuf_t m, int chanidx, int rssi, uint32_t ti
             awdlLargestPeer[kind] = frameLength;
             if (!awdlRawSamples) {
             } else if (auto *largest = OSData::withBytes(f, unsigned(MIN(frameLength, size_t(2048))))) {
-                IORegistryEntry::getRegistryRoot()->setProperty(kind ? "ITLAWDLSampleLargestMIF" : "ITLAWDLSampleLargestPSF", largest);
+                IORegistryEntry::getRegistryRoot()->setProperty(kind ? "AwSampleLargestMIF" : "AwSampleLargestPSF", largest);
                 largest->release();
             }
         }
@@ -7809,7 +7809,7 @@ awdlCoexCycleTask(void *arg)
         awdlCoexWant = !awdlCoexWant;
         ++awdlCoexCycleFlips;
         (void)that->awdlCoexListener(sc, awdlCoexWant);
-        IORegistryEntry::getRegistryRoot()->setProperty("ITLAWDLCoexCycleFlips", awdlCoexCycleFlips, 32);
+        IORegistryEntry::getRegistryRoot()->setProperty("AwCoexCycleFlips", awdlCoexCycleFlips, 32);
     }
     if (!awdlStopping)
         timeout_add_sec(&awdlCoexTimer, awdlCoexCycleSecs);
@@ -8042,7 +8042,7 @@ static bool awdlCoexChannelEligible(struct ieee80211com *ic, struct ieee80211_ch
 {
     const unsigned number = channel ? ieee80211_chan2ieee(ic, channel) : 0;
     const uint32_t flags = channel ? channel->ic_flags : 0;
-    const uint32_t reason = (!channel || number > 255 || !ItlAWDL::fixedScheduleChannel(uint8_t(number)) ? 1U : 0U) |
+    const uint32_t reason = (!channel || number > 255 || !Aw::fixedScheduleChannel(uint8_t(number)) ? 1U : 0U) |
         ((channel && awdlCoexNoIr(ic, number)) ? 2U : 0U) | ((flags & IEEE80211_CHAN_DFS) ? 4U : 0U) |
         ((flags & IEEE80211_CHAN_NOADHOC) ? 8U : 0U) |
         (!channel || number > 255 || !isset(ic->ic_chan_active, number) ? 16U : 0U) |
@@ -8118,8 +8118,8 @@ awdlCoexTxTask(void *arg)
         !(sc->sc_flags & (IWX_FLAG_HW_ERR | IWX_FLAG_SHUTDOWN | IWX_FLAG_RFKILL));
     if (running && awdlCoexCountryPending && awdlCoexCountryGen == sc->sc_generation &&
         (!awdlCoexCountryRetryUS || awdlUptimeUS() >= awdlCoexCountryRetryUS) &&
-        (!ItlAWDL::countryNoticeUsable(awdlCoexCountryNotice, awdlCoexCountrySource) ||
-         ItlAWDL::mccEchoDue(awdlCoexCountryAnswers != 0, mccUptimeSeconds(), awdlCoexCountryAnswerSeconds)))
+        (!Aw::countryNoticeUsable(awdlCoexCountryNotice, awdlCoexCountrySource) ||
+         Aw::mccEchoDue(awdlCoexCountryAnswers != 0, mccUptimeSeconds(), awdlCoexCountryAnswerSeconds)))
         that->awdlCoexCountryAnswer(sc);
     if ((running || awdlSelfLink) && !awdlStopping && awdlCoexAdded && awdlCoexGeneration == sc->sc_generation)
         that->awdlCoexRetarget(sc);
@@ -8202,7 +8202,7 @@ awdlCoexTxTask(void *arg)
             awTimingUsable &&
             awdlCoexPeerSchedule.inPresentAwStart(taskNowUS, kAwdlAwSyncWindowUS, awdlCoexAwSyncAssume);
         const bool syncDue = !awdlCoexData || awTimed ||
-            sinceSync >= (coexDataActive ? 100000ULL : ItlAWDL::kSyncIdleIntervalUS);
+            sinceSync >= (coexDataActive ? 100000ULL : Aw::kSyncIdleIntervalUS);
         if (awdlCoexTxStaAdded && !awdlCoexInFlight && !awdlCoexTxHalted && !awdlStopping && awdlCoexAdded &&
             taskNowUS >= awdlCoexTxPauseUntilUS && syncDue) {
             awdlCoexLastSyncUS = taskNowUS;
@@ -8249,7 +8249,7 @@ awdlCoexTxTask(void *arg)
                     const size_t size = offsetof(CoexBaTimeline, entries) +
                         MIN(timeline.count, CoexBaTimeline::capacity) * sizeof(CoexBaTimelineEntry);
                     if (auto *data = OSData::withBytes(&timeline, size)) {
-                        if (IORegistryEntry::getRegistryRoot()->setProperty("ITLAWDLCoexBaTimeline", data))
+                        if (IORegistryEntry::getRegistryRoot()->setProperty("AwCoexBaTimeline", data))
                             awdlCoexBaTimelinePublishedUS = now;
                         data->release();
                     }
@@ -8287,7 +8287,7 @@ awdlCoexTxTask(void *arg)
 void ItlIwx::
 awdlCoexDataPump(struct iwx_softc *sc, unsigned budget)
 {
-#if defined(ITL_AWDL_NATIVE)
+#if defined(AW_NATIVE)
     struct ieee80211com *ic = &sc->sc_ic;
     const int gen = sc->sc_generation;
     struct iwx_node *in = (struct iwx_node *)ic->ic_bss;
@@ -8336,10 +8336,10 @@ awdlCoexDataPump(struct iwx_softc *sc, unsigned budget)
     bool gateClosed = false;
     if (awdlCoexGate && !aggregate && awdlCoexScheduleCurrent()) {
         const uint64_t gateNowUS = awdlUptimeUS();
-        const bool dozing = awdlCoexPeerSchedule.presentEntries() <= ItlAWDL::kPeerDozeMaxEntries &&
+        const bool dozing = awdlCoexPeerSchedule.presentEntries() <= Aw::kPeerDozeMaxEntries &&
             (!awdlCoexSchedPeerRxUS || gateNowUS - awdlCoexSchedPeerRxUS > kAwdlGateAwakeUS);
         const auto gate = awdlCoexPeerSchedule.sendGate(gateNowUS, dozing, kAwdlGateAwWindowUS);
-        if (gate == ItlAWDL::PeerSchedule::SendGate::Open) {
+        if (gate == Aw::PeerSchedule::SendGate::Open) {
             awdlCoexGateSinceUS = 0;
             awdlCoexGateKind = 0;
         } else {
@@ -8350,12 +8350,12 @@ awdlCoexDataPump(struct iwx_softc *sc, unsigned budget)
                 awdlCoexGateSinceUS = gateNowUS;
                 awdlCoexGateKind = kind;
                 // Away: through the away run (450 ms ceiling). Doze: until the next AW start, with 2 ms spare.
-                awdlCoexGateLimitUS = gate == ItlAWDL::PeerSchedule::SendGate::Away ?
+                awdlCoexGateLimitUS = gate == Aw::PeerSchedule::SendGate::Away ?
                     awdlCoexPeerSchedule.pauseLimitUS(gateNowUS) : awdlCoexPeerSchedule.awUS() + 2000;
             }
             if (gateNowUS - awdlCoexGateSinceUS < awdlCoexGateLimitUS) {
                 gateClosed = true;
-                if (gate == ItlAWDL::PeerSchedule::SendGate::Away)
+                if (gate == Aw::PeerSchedule::SendGate::Away)
                     ++awdlCoexGateAwayTicks;
                 else
                     ++awdlCoexGateDozeTicks;
@@ -8408,7 +8408,7 @@ awdlCoexDataPump(struct iwx_softc *sc, unsigned budget)
         // aggregate queue clears. Slot 0 held this way since iface160; slots 1..N-1 used to pop straight
         // into a paused or full firmware queue, which trickled single frames out and kept their
         // aggregates at half slot 0's depth (22 frames per submission against 44, slot-bound).
-        ItlAWDLTransmitHold holds[1 + kAwdlCoexBaMaxPeers];
+        AwTransmitHold holds[1 + kAwdlCoexBaMaxPeers];
         unsigned holdCount = 0;
         // A closed gate holds every frame for the schedule peer; frames for others still go.
         if (gateClosed) {
@@ -8441,26 +8441,26 @@ awdlCoexDataPump(struct iwx_softc *sc, unsigned budget)
         const uint8_t *nextBytes = static_cast<const uint8_t *>(mbuf_data(next));
         const bool unicast = mbuf_len(next) >= 24 && !(nextBytes[4] & 1);
         if (unicast) {
-            if (!ItlAWDL::sameAddress(nextBytes + 4, awdlCoexTxDest)) {
+            if (!Aw::sameAddress(nextBytes + 4, awdlCoexTxDest)) {
                 // A flip to another slot's peer isn't a new destination for slot 0's bulk detector:
                 // with two phones transferring at once the head frame alternates, and resetting on
                 // every flip would keep either aggregate path from ever engaging.
                 bool otherSlotPeer = false;
                 for (unsigned baSlot = 1; baSlot < kAwdlCoexBaMaxPeers; ++baSlot)
                     otherSlotPeer |= awdlCoexBaSlots[baSlot].peerAdded &&
-                        ItlAWDL::sameAddress(nextBytes + 4, awdlCoexBaSlots[baSlot].peer);
+                        Aw::sameAddress(nextBytes + 4, awdlCoexBaSlots[baSlot].peer);
                 memcpy(awdlCoexTxDest, nextBytes + 4, sizeof(awdlCoexTxDest));
                 if (!otherSlotPeer)
-                    awdlCoexBaTxBulk = ItlAWDL::BaTxBulkState{};
+                    awdlCoexBaTxBulk = Aw::BaTxBulkState{};
             }
             // Count payload-sized frames so incoming TCP ACK bursts do not start bulk TX.
             if (mbuf_len(next) >= 1200)
                 ++awdlCoexTxDestFrames;
-            if (awdlCoexBaPeerAdded && ItlAWDL::sameAddress(nextBytes + 4, awdlCoexBaPeer))
+            if (awdlCoexBaPeerAdded && Aw::sameAddress(nextBytes + 4, awdlCoexBaPeer))
                 awdlCoexBaTxPeerLastUS = awdlCoexBaPeerLastUS = awdlUptimeUS();
             for (unsigned baSlot = 1; baSlot < kAwdlCoexBaMaxPeers; ++baSlot) {
                 auto &s = awdlCoexBaSlots[baSlot];
-                if (s.peerAdded && ItlAWDL::sameAddress(nextBytes + 4, s.peer)) {
+                if (s.peerAdded && Aw::sameAddress(nextBytes + 4, s.peer)) {
                     memcpy(s.txDest, nextBytes + 4, sizeof(s.txDest));
                     if (mbuf_len(next) >= 1200)
                         ++s.destPayloads;
@@ -8477,11 +8477,11 @@ awdlCoexDataPump(struct iwx_softc *sc, unsigned budget)
         if ((aggregate || earlyPayload || followAgg) && !awdlCoexPeerPause.paused &&
             unicast && !mbuf_next(next) && nextBytes[0] == 0x08 &&
             uint32_t(sc->txq[awdlCoexBaTxQueue].queued) < awdlCoexBaTxQueuedCap(awdlCoexBaSlots[0]) &&
-            ItlAWDL::sameAddress(nextBytes + 4, awdlCoexBaPeer)) {
+            Aw::sameAddress(nextBytes + 4, awdlCoexBaPeer)) {
             // QoS data on TID 0 with our sequence, on the peer's aggregation queue, at firmware-chosen rates.
             mbuf_t qos = nullptr;
             if (!mbuf_getpacket(MBUF_DONTWAIT, &qos) && qos) {
-                const size_t qosLength = ItlAWDL::buildQosData(nextBytes, mbuf_len(next), kAwdlBaTxTid, awdlCoexBaTxSeq,
+                const size_t qosLength = Aw::buildQosData(nextBytes, mbuf_len(next), kAwdlBaTxTid, awdlCoexBaTxSeq,
                                                                static_cast<uint8_t *>(mbuf_data(qos)), mbuf_maxlen(qos));
                 if (qosLength) {
                     mbuf_setlen(qos, qosLength);
@@ -8517,7 +8517,7 @@ awdlCoexDataPump(struct iwx_softc *sc, unsigned budget)
         for (unsigned baSlot = 1; baSlot < kAwdlCoexBaMaxPeers && !takenAgg; ++baSlot) {
             auto &s = awdlCoexBaSlots[baSlot];
             // Counted apart so a slot that never takes a frame says which condition held it back.
-            if (!aggregateEligibleN[baSlot] || !s.peerAdded || !ItlAWDL::sameAddress(nextBytes + 4, s.peer))
+            if (!aggregateEligibleN[baSlot] || !s.peerAdded || !Aw::sameAddress(nextBytes + 4, s.peer))
                 continue;
             if (!unicast || mbuf_next(next) || nextBytes[0] != 0x08) {
                 ++s.aggSkipShape;
@@ -8557,7 +8557,7 @@ awdlCoexDataPump(struct iwx_softc *sc, unsigned budget)
             mbuf_t qos = nullptr;
             if (mbuf_getpacket(MBUF_DONTWAIT, &qos) || !qos)
                 break;
-            const size_t qosLength = ItlAWDL::buildQosData(nextBytes, mbuf_len(next), kAwdlBaTxTid, s.txSeq,
+            const size_t qosLength = Aw::buildQosData(nextBytes, mbuf_len(next), kAwdlBaTxTid, s.txSeq,
                                                            static_cast<uint8_t *>(mbuf_data(qos)), mbuf_maxlen(qos));
             if (!qosLength) {
                 mbuf_freem(qos);
@@ -8591,7 +8591,7 @@ awdlCoexDataPump(struct iwx_softc *sc, unsigned budget)
         // What still takes the single-frame queue for the Block Ack peer while its aggregate queue holds
         // frames. With awdlCoexOrder this should stay near zero; without it, it counts the overtaking.
         if (unicast && aggregateEligible && sc->txq[awdlCoexBaTxQueue].queued > 0 &&
-            ItlAWDL::sameAddress(nextBytes + 4, awdlCoexBaPeer))
+            Aw::sameAddress(nextBytes + 4, awdlCoexBaPeer))
             ++awdlCoexOrderSingleBehindAgg;
         auto *node = ieee80211_ref_node(ic->ic_bss);
         awdlCoexSending = true;
@@ -8633,14 +8633,14 @@ awdlCoexBaSlotRemovePeer(struct iwx_softc *sc, unsigned slot)
     s.queueAllocPending = false;
     s.peerPause.paused = false;
     s.resumePending = false;
-    s.peerBulk = ItlAWDL::PeerBulkState{};
+    s.peerBulk = Aw::PeerBulkState{};
     s.tids = 0;
     s.tidTeardown = 0;
     s.rxIdleTids = 0;
     const int txQueue = s.txQueue;
     s.txState = kCoexBaTxOff;
     s.txQueue = -1;
-    s.txBulk = ItlAWDL::BaTxBulkState{};
+    s.txBulk = Aw::BaTxBulkState{};
     awdlCoexRateStep = 0;
     awdlCoexRateWindowOK = awdlCoexRateWindowFailed = 0;
     s.peerHeUS = 0;
@@ -8668,7 +8668,7 @@ awdlCoexBaSlotRemovePeer(struct iwx_softc *sc, unsigned slot)
         s.failedGen = gen;
     if (awdlCoexBaFilterOff) {
         awdlCoexBaFilterOff = false;
-        awdlCoexBaFilter = ItlAWDL::BaFilterState{};
+        awdlCoexBaFilter = Aw::BaFilterState{};
         if (awdlCoexAdded)
             (void)awdlCoexMacSend(sc, IWX_FW_CTXT_ACTION_MODIFY);
     }
@@ -8733,7 +8733,7 @@ awdlCoexBaSlotAddPeer(struct iwx_softc *sc, unsigned slot, const uint8_t *peer)
     s.resumeRetryUS = 0;
     s.resumeFailStreak = 0;
     s.peerPause.holdOffUntilUS = 0;
-    s.peerBulk = ItlAWDL::PeerBulkState{};
+    s.peerBulk = Aw::PeerBulkState{};
     ++s.txToken;
     s.txRestUntilUS = 0;
     awdlCoexBaProbeTried[slot] = false;
@@ -8805,13 +8805,13 @@ awdlCoexBaSlotPauseStep(struct iwx_softc *sc, unsigned slot)
     // agreement, so a second peer paused on it is paused in someone else's away time and its station ends up
     // with transmit disabled while it has data to send. Slots past the first use the windows learned for
     // their own peer, and with none learned they are not paused at all.
-    const ItlAWDL::PeerSchedule *pauseSched = slot == 0 ? &awdlCoexPeerSchedule : awdlCoexProbeScheduleFor(s.peer);
+    const Aw::PeerSchedule *pauseSched = slot == 0 ? &awdlCoexPeerSchedule : awdlCoexProbeScheduleFor(s.peer);
     const bool pauseSchedOk = slot == 0 ? awdlCoexScheduleCurrent() : (pauseSched && pauseSched->known());
     const bool want = (aggActive || queuedForPeer) && s.txState == kCoexBaTxAgreed &&
         !awdlCoexMovePending && !awdlCoexTxHalted && pauseSchedOk && pauseSched->shouldPause(now);
     const auto before = s.peerPause;
     // Reading the limit only matters when a pause starts, but the argument is built either way.
-    const uint64_t pauseLimit = pauseSched ? pauseSched->pauseLimitUS(now) : ItlAWDL::kPeerPauseMaxUS;
+    const uint64_t pauseLimit = pauseSched ? pauseSched->pauseLimitUS(now) : Aw::kPeerPauseMaxUS;
     const int change = s.peerPause.step(want, now, pauseLimit);
     if (!change)
         return;
@@ -8850,7 +8850,7 @@ awdlCoexBaSlotPauseStep(struct iwx_softc *sc, unsigned slot)
     uint32_t status = IWX_ADD_STA_SUCCESS;
     const int err = iwx_send_cmd_pdu_status(sc, IWX_ADD_STA, sizeof(cmd), &cmd, &status);
     if (gen != sc->sc_generation || tok != awdlCoexToken || !s.peerAdded || epoch != s.peerEpoch ||
-        !ItlAWDL::sameAddress(peer, s.peer))
+        !Aw::sameAddress(peer, s.peer))
         return; // A newer owner's state stands; removal or replacement already cleared the pause.
     s.resumePending = false;
     if (err || (status & IWX_ADD_STA_STATUS_MASK) != IWX_ADD_STA_SUCCESS) {
@@ -8883,7 +8883,7 @@ void ItlIwx::
 awdlCoexBaHandleSlot(struct iwx_softc *sc, unsigned slot)
 {
     auto &s = awdlCoexBaSlots[slot];
-#if defined(ITL_AWDL_NATIVE)
+#if defined(AW_NATIVE)
     const int gen = sc->sc_generation;
     if (s.gen != gen) {
         s.gen = gen;
@@ -8947,7 +8947,7 @@ awdlCoexBaHandleSlot(struct iwx_softc *sc, unsigned slot)
                     if (other == slot)
                         continue;
                     auto &o = awdlCoexBaSlots[other];
-                    if (o.peerAdded && ItlAWDL::sameAddress(o.peer, yieldPeer) && o.requestsPending.empty())
+                    if (o.peerAdded && Aw::sameAddress(o.peer, yieldPeer) && o.requestsPending.empty())
                         (void)awdlCoexBaSlotRemovePeer(sc, other);
                 }
             }
@@ -9019,9 +9019,9 @@ awdlCoexBaHandleSlot(struct iwx_softc *sc, unsigned slot)
                 retire = true;
             } else if ((s.delbaTries == 0 || s.delbaResult == 2) && now >= s.delbaNextTryUS) {
                 static const uint8_t kDelbaBssid[6] = {0x00, 0x25, 0x00, 0xff, 0x94, 0x73};
-                uint8_t delba[ItlAWDL::kDelbaLength];
+                uint8_t delba[Aw::kDelbaLength];
                 if (now >= awdlCoexTxPauseUntilUS &&
-                    ItlAWDL::buildDelba(delba, sizeof(delba), s.peer, awdlCoexAddr, kDelbaBssid,
+                    Aw::buildDelba(delba, sizeof(delba), s.peer, awdlCoexAddr, kDelbaBssid,
                                        uint8_t(tid), false, 39, ++s.sequence) &&
                     awdlCoexSendMgmt(sc, delba, sizeof(delba), kCoexSlotDelba, slot)) {
                     ++awdlCoexBaDelbasSent;
@@ -9066,9 +9066,9 @@ awdlCoexBaHandleSlot(struct iwx_softc *sc, unsigned slot)
     }
     s.tidTeardown &= s.tids;
     // A fresh request for the retiring session waits, while other BA work continues.
-    ItlAWDL::AddbaRequest request;
+    Aw::AddbaRequest request;
     if (!s.answerLength && s.requestsPending.take(s.tidTeardown, request)) {
-        if (s.peerAdded && !ItlAWDL::sameAddress(request.peer, s.peer)) {
+        if (s.peerAdded && !Aw::sameAddress(request.peer, s.peer)) {
             ++awdlCoexBaOtherPeer;
             return;
         }
@@ -9127,7 +9127,7 @@ awdlCoexBaHandleSlot(struct iwx_softc *sc, unsigned slot)
         if (!(s.tidTeardown & tidBit)) {
             s.answerTid = request.tid;
             s.answerRetryUS = 0;
-            s.answerLength = ItlAWDL::buildAddbaResponse(s.answer, sizeof(s.answer), request,
+            s.answerLength = Aw::buildAddbaResponse(s.answer, sizeof(s.answer), request,
                                                                  awdlCoexAddr, ++s.sequence);
         }
     }
@@ -9155,7 +9155,7 @@ awdlCoexBaHandleSlot(struct iwx_softc *sc, unsigned slot)
     }();
     if (awdlCoexBaFilterHysteresis) {
         filterChange = anyReceiveSession && stillOurs() &&
-            ItlAWDL::noteBaFilterTraffic(awdlCoexBaFilter, awdlUptimeUS(), awdlCoexDataRxUcast);
+            Aw::noteBaFilterTraffic(awdlCoexBaFilter, awdlUptimeUS(), awdlCoexDataRxUcast);
     } else if (stillOurs()) {
         const bool receiveSession = anyReceiveSession;
         // Any slot still negotiating drives the probe: its peer's reply only reaches us while
@@ -9210,12 +9210,12 @@ awdlCoexBaHandleSlot(struct iwx_softc *sc, unsigned slot)
         awdlCoexBaEventLastState = s.txState;
     }
     // Detect outbound payload bursts within a quarter second after BA is ready.
-    (void)ItlAWDL::noteBaTxTraffic(s.txBulk, now, slot == 0 ? awdlCoexTxDestFrames : s.destPayloads,
+    (void)Aw::noteBaTxTraffic(s.txBulk, now, slot == 0 ? awdlCoexTxDestFrames : s.destPayloads,
                                   s.txState == kCoexBaTxAgreed);
     const uint8_t *destForSlot = slot == 0 ? awdlCoexTxDest : s.txDest;
 
     if (!s.peerAdded) {
-        if (!s.txBulk.bulk || !ItlAWDL::knownAddress(destForSlot) ||
+        if (!s.txBulk.bulk || !Aw::knownAddress(destForSlot) ||
             !awdlCoexPeerKnown(destForSlot, now))
             return;
         ++s.txPeerAdds;
@@ -9229,7 +9229,7 @@ awdlCoexBaHandleSlot(struct iwx_softc *sc, unsigned slot)
     // Dedicated mode negotiates as soon as the peer ACKs our receive BA answer.
     // Keep the bulk trigger for peers that have not opened an inbound session.
     if (!s.peerAccepted &&
-        (!s.txBulk.bulk || !ItlAWDL::sameAddress(destForSlot, s.peer)))
+        (!s.txBulk.bulk || !Aw::sameAddress(destForSlot, s.peer)))
         return;
     if (s.txState == kCoexBaTxOff) {
         if (s.queueAllocPending)
@@ -9314,7 +9314,7 @@ awdlCoexBaHandleSlot(struct iwx_softc *sc, unsigned slot)
     // a second peer asked on it is asked while that first peer is on channel and it is not — the request goes
     // out unheard and the answer never comes. A slot past the first asks on the windows learned for its own
     // peer; with none learned yet it keeps the blind cadence rather than stalling.
-    const ItlAWDL::PeerSchedule *askSched = nullptr;
+    const Aw::PeerSchedule *askSched = nullptr;
     if (slot) {
         askSched = awdlCoexProbeScheduleFor(s.peer);
         if (askSched)
@@ -9345,8 +9345,8 @@ awdlCoexBaHandleSlot(struct iwx_softc *sc, unsigned slot)
     if (askNow < awdlCoexTxPauseUntilUS)
         return;
     static const uint8_t kBssid[6] = {0x00, 0x25, 0x00, 0xff, 0x94, 0x73};
-    uint8_t ask[ItlAWDL::kAddbaResponseLength];
-    const size_t askLength = ItlAWDL::buildAddbaRequest(ask, sizeof(ask), s.peer, awdlCoexAddr, kBssid,
+    uint8_t ask[Aw::kAddbaResponseLength];
+    const size_t askLength = Aw::buildAddbaRequest(ask, sizeof(ask), s.peer, awdlCoexAddr, kBssid,
         s.txToken, kAwdlBaTxTid, kAwdlCoexBaWindowMax, s.txSeq, ++s.sequence);
     if (askLength && awdlCoexSendMgmt(sc, ask, askLength, kCoexSlotBaAsk, slot)) {
         s.txLastAskUS = askNow;
@@ -9416,272 +9416,272 @@ awdlRxTask(void *arg)
     if (dataCounters != lastDataCounters) {
         lastDataCounters = dataCounters;
         auto *root = IORegistryEntry::getRegistryRoot();
-        root->setProperty("ITLAWDLDataIPv6Frames", awdlRxStat.dataIPv6, 32);
-        root->setProperty("ITLAWDLDataMalformed", awdlRxStat.dataMalformed, 32);
-        root->setProperty("ITLAWDLDataUnsupported", awdlRxStat.dataUnsupported, 32);
+        root->setProperty("AwDataIPv6Frames", awdlRxStat.dataIPv6, 32);
+        root->setProperty("AwDataMalformed", awdlRxStat.dataMalformed, 32);
+        root->setProperty("AwDataUnsupported", awdlRxStat.dataUnsupported, 32);
     }
     {
         auto *root = IORegistryEntry::getRegistryRoot();
-        root->setProperty("ITLAWDLHeardSelfEchoes", awdlSeen.selfEchoes, 32);
-        root->setProperty("ITLAWDLHeardActionToUs", awdlSeen.actionToUs, 32);
-        root->setProperty("ITLAWDLHeardActionMentions", awdlSeen.actionMentions, 32);
-        root->setProperty("ITLAWDLHeardDataMulticast", awdlSeen.dataMulticast, 32);
-        root->setProperty("ITLAWDLHeardDataToUs", awdlSeen.dataToUs, 32);
-        root->setProperty("ITLAWDLHeardDataToOther", awdlSeen.dataToOther, 32);
-        root->setProperty("ITLAWDLHeardDataMDNS", awdlSeen.dataMDNS, 32);
-        root->setProperty("ITLAWDLTrainSubmitted", that->awdlMonitorSubmitted, 32);
-        root->setProperty("ITLAWDLDataRateMbps", ItlAWDL::dataRateMbps(awdlDataRate.step), 32);
-            root->setProperty("ITLAWDLTxKicks", awdlTxKicks, 32);
-            root->setProperty("ITLAWDLResendSent", awdlResendSent, 32);
-            root->setProperty("ITLAWDLResendRecovered", awdlResendRecovered, 32);
-            root->setProperty("ITLAWDLResendGaveUp", awdlResendGaveUp, 32);
+        root->setProperty("AwHeardSelfEchoes", awdlSeen.selfEchoes, 32);
+        root->setProperty("AwHeardActionToUs", awdlSeen.actionToUs, 32);
+        root->setProperty("AwHeardActionMentions", awdlSeen.actionMentions, 32);
+        root->setProperty("AwHeardDataMulticast", awdlSeen.dataMulticast, 32);
+        root->setProperty("AwHeardDataToUs", awdlSeen.dataToUs, 32);
+        root->setProperty("AwHeardDataToOther", awdlSeen.dataToOther, 32);
+        root->setProperty("AwHeardDataMDNS", awdlSeen.dataMDNS, 32);
+        root->setProperty("AwTrainSubmitted", that->awdlMonitorSubmitted, 32);
+        root->setProperty("AwDataRateMbps", Aw::dataRateMbps(awdlDataRate.step), 32);
+            root->setProperty("AwTxKicks", awdlTxKicks, 32);
+            root->setProperty("AwResendSent", awdlResendSent, 32);
+            root->setProperty("AwResendRecovered", awdlResendRecovered, 32);
+            root->setProperty("AwResendGaveUp", awdlResendGaveUp, 32);
             if (auto *rateResults = OSData::withBytes(awdlRateResults, sizeof(awdlRateResults))) {
-                root->setProperty("ITLAWDLTxRateResults", rateResults);
+                root->setProperty("AwTxRateResults", rateResults);
                 rateResults->release();
             }
-        root->setProperty("ITLAWDLFixedChannel", awdlFixedChannel, 32);
-        root->setProperty("ITLAWDLBtCoexMode", ItlAWDL::btCoexModeFor(awdlBtCoexRequest, IWX_BT_COEX_WIFI), 32);
-        root->setProperty("ITLAWDLRequestedCountry", awdlCountry);
-        root->setProperty("ITLAWDLCountryScans", awdlCountryScans, 32);
-        root->setProperty("ITLAWDLBackgroundScans", awdlBackgroundScans, 32);
-        root->setProperty("ITLAWDLMovesUp", awdlMovesUp, 32);
-        root->setProperty("ITLAWDLMovesDown", awdlMovesDown, 32);
-        root->setProperty("ITLAWDLLastMoveMs", awdlChannelMove.lastMoveMs, 32);
-        root->setProperty("ITLAWDLMulticastCopies", awdlMulticastCopies, 32);
-        root->setProperty("ITLAWDLMulticastRepeatsSent", awdlMulticastRepeatsSent, 32);
-        root->setProperty("ITLAWDLMulticastOverwritten", awdlMulticastRepeats.overwritten, 32);
-        root->setProperty("ITLAWDLTxWindow", awdlWindow, 32);
-        root->setProperty("ITLAWDLIntCoalescing", awdlIntCoalescing, 32);
-        root->setProperty("ITLAWDLFlightSumUS", awdlFlightSumUS, 64);
-        root->setProperty("ITLAWDLIdleSumUS", awdlIdleSumUS, 64);
-        if (auto *o = OSData::withBytes(awdlFlightOK, sizeof(awdlFlightOK))) { root->setProperty("ITLAWDLFlightOK", o); o->release(); }
-        if (auto *o = OSData::withBytes(awdlFlightFail, sizeof(awdlFlightFail))) { root->setProperty("ITLAWDLFlightFail", o); o->release(); }
-        if (auto *o = OSData::withBytes(&awdlTxService, sizeof(awdlTxService))) { root->setProperty("ITLAWDLTxService", o); o->release(); }
-        if (auto *o = OSData::withBytes(&awdlPeerSchedule, sizeof(awdlPeerSchedule))) { root->setProperty("ITLAWDLPeerSchedule", o); o->release(); }
-        if (auto *o = OSData::withBytes(&awdlPeerPauseState, sizeof(awdlPeerPauseState))) { root->setProperty("ITLAWDLPeerPause", o); o->release(); }
-        root->setProperty("ITLAWDLPeerSyncFrames", awdlPeerSyncFrames, 32);
-        root->setProperty("ITLAWDLPeerPauseOn", awdlPeerPause);
+        root->setProperty("AwFixedChannel", awdlFixedChannel, 32);
+        root->setProperty("AwBtCoexMode", Aw::btCoexModeFor(awdlBtCoexRequest, IWX_BT_COEX_WIFI), 32);
+        root->setProperty("AwRequestedCountry", awdlCountry);
+        root->setProperty("AwCountryScans", awdlCountryScans, 32);
+        root->setProperty("AwBackgroundScans", awdlBackgroundScans, 32);
+        root->setProperty("AwMovesUp", awdlMovesUp, 32);
+        root->setProperty("AwMovesDown", awdlMovesDown, 32);
+        root->setProperty("AwLastMoveMs", awdlChannelMove.lastMoveMs, 32);
+        root->setProperty("AwMulticastCopies", awdlMulticastCopies, 32);
+        root->setProperty("AwMulticastRepeatsSent", awdlMulticastRepeatsSent, 32);
+        root->setProperty("AwMulticastOverwritten", awdlMulticastRepeats.overwritten, 32);
+        root->setProperty("AwTxWindow", awdlWindow, 32);
+        root->setProperty("AwIntCoalescing", awdlIntCoalescing, 32);
+        root->setProperty("AwFlightSumUS", awdlFlightSumUS, 64);
+        root->setProperty("AwIdleSumUS", awdlIdleSumUS, 64);
+        if (auto *o = OSData::withBytes(awdlFlightOK, sizeof(awdlFlightOK))) { root->setProperty("AwFlightOK", o); o->release(); }
+        if (auto *o = OSData::withBytes(awdlFlightFail, sizeof(awdlFlightFail))) { root->setProperty("AwFlightFail", o); o->release(); }
+        if (auto *o = OSData::withBytes(&awdlTxService, sizeof(awdlTxService))) { root->setProperty("AwTxService", o); o->release(); }
+        if (auto *o = OSData::withBytes(&awdlPeerSchedule, sizeof(awdlPeerSchedule))) { root->setProperty("AwPeerSchedule", o); o->release(); }
+        if (auto *o = OSData::withBytes(&awdlPeerPauseState, sizeof(awdlPeerPauseState))) { root->setProperty("AwPeerPause", o); o->release(); }
+        root->setProperty("AwPeerSyncFrames", awdlPeerSyncFrames, 32);
+        root->setProperty("AwPeerPauseOn", awdlPeerPause);
         if (awdlAwSync)
-            root->setProperty("ITLAWDLAwSyncFrames", awdlAwSyncFrames, 32);
-        root->setProperty("ITLAWDLPeerBulkChanges", awdlPeerBulk.changes, 32);
-        root->setProperty("ITLAWDLPeerBulkActive", awdlPeerBulk.active);
+            root->setProperty("AwAwSyncFrames", awdlAwSyncFrames, 32);
+        root->setProperty("AwPeerBulkChanges", awdlPeerBulk.changes, 32);
+        root->setProperty("AwPeerBulkActive", awdlPeerBulk.active);
         // About 80 KB, so only a few times while it fills, and once when full.
         if (awdlTxTrace.count && awdlTxTrace.count != awdlTxTracePublished &&
             (awdlTxTrace.full() || awdlTxTrace.count >= awdlTxTracePublished + 1024)) {
             awdlTxTracePublished = awdlTxTrace.count;
-            if (auto *o = OSData::withBytes(&awdlTxTrace, sizeof(awdlTxTrace))) { root->setProperty("ITLAWDLTxTrace", o); o->release(); }
+            if (auto *o = OSData::withBytes(&awdlTxTrace, sizeof(awdlTxTrace))) { root->setProperty("AwTxTrace", o); o->release(); }
         }
         if (awdlBaTrace.count && awdlBaTrace.count != awdlBaTracePublished &&
             (awdlBaTrace.full() || awdlBaTrace.count >= awdlBaTracePublished + 1024)) {
             awdlBaTracePublished = awdlBaTrace.count;
-            if (auto *o = OSData::withBytes(&awdlBaTrace, sizeof(awdlBaTrace))) { root->setProperty("ITLAWDLBaTrace", o); o->release(); }
+            if (auto *o = OSData::withBytes(&awdlBaTrace, sizeof(awdlBaTrace))) { root->setProperty("AwBaTrace", o); o->release(); }
         }
         if (awdlRadioProbe) {
-            root->setProperty("ITLAWDLRadioRequests", awdlRadioRequests, 32);
-            root->setProperty("ITLAWDLRadioRequestErrors", awdlRadioRequestErrors, 32);
-            root->setProperty("ITLAWDLRadioUnexpectedLengths", awdlRadioUnexpectedLengths, 32);
-            root->setProperty("ITLAWDLRadioReports", awdlRadioReports, 32);
-            root->setProperty("ITLAWDLRadioLastCommandLength", awdlRadioLastCommandLength, 32);
-            root->setProperty("ITLAWDLRadioLastNotificationLength", awdlRadioLastNotificationLength, 32);
+            root->setProperty("AwRadioRequests", awdlRadioRequests, 32);
+            root->setProperty("AwRadioRequestErrors", awdlRadioRequestErrors, 32);
+            root->setProperty("AwRadioUnexpectedLengths", awdlRadioUnexpectedLengths, 32);
+            root->setProperty("AwRadioReports", awdlRadioReports, 32);
+            root->setProperty("AwRadioLastCommandLength", awdlRadioLastCommandLength, 32);
+            root->setProperty("AwRadioLastNotificationLength", awdlRadioLastNotificationLength, 32);
             if (awdlRadioReports) {
-                root->setProperty("ITLAWDLRadioReportUS", awdlRadioReportUS, 64);
-                root->setProperty("ITLAWDLRadioTemperature", awdlRadioTemperature, 32);
-                root->setProperty("ITLAWDLRadioRxTime", awdlRadioRxTime, 64);
-                root->setProperty("ITLAWDLRadioTxTime", awdlRadioTxTime, 64);
-                root->setProperty("ITLAWDLRadioOnTime", awdlRadioOnTime, 64);
+                root->setProperty("AwRadioReportUS", awdlRadioReportUS, 64);
+                root->setProperty("AwRadioTemperature", awdlRadioTemperature, 32);
+                root->setProperty("AwRadioRxTime", awdlRadioRxTime, 64);
+                root->setProperty("AwRadioTxTime", awdlRadioTxTime, 64);
+                root->setProperty("AwRadioOnTime", awdlRadioOnTime, 64);
             }
             if (auto *o = OSData::withBytes(awdlRadioBeacons, sizeof(awdlRadioBeacons))) {
-                root->setProperty("ITLAWDLRadioBeacons", o);
+                root->setProperty("AwRadioBeacons", o);
                 o->release();
             }
             if (auto *o = OSData::withBytes(awdlRadioOtherData, sizeof(awdlRadioOtherData))) {
-                root->setProperty("ITLAWDLRadioOtherData", o);
+                root->setProperty("AwRadioOtherData", o);
                 o->release();
             }
         }
-        root->setProperty("ITLAWDLTxWindowFullExits", awdlTxWindowFullExits, 32);
-        root->setProperty("ITLAWDLTxStackEmptyExits", awdlTxStackEmptyExits, 32);
-        if (auto *o = OSData::withBytes(awdlSlots6Frames, sizeof(awdlSlots6Frames))) { root->setProperty("ITLAWDLSlots6Frames", o); o->release(); }
-        if (auto *o = OSData::withBytes(awdlSlotChanges, unsigned(awdlSlotChangeCount * sizeof(awdlSlotChanges[0])))) { root->setProperty("ITLAWDLSlotChanges", o); o->release(); }
-        root->setProperty("ITLAWDLPeerCountryFrames", awdlPeerCountryFrames, 32);
-        root->setProperty("ITLAWDLPeerCountryChanges", awdlPeerCountry.changes, 32);
-        root->setProperty("ITLAWDLPeerCountryConfirmed", awdlPeerCountry.confirmed, 32);
-        root->setProperty("ITLAWDLPeerCountryAsked", awdlPeerCountryAsked ? 1ULL : 0ULL, 32);
-        root->setProperty("ITLAWDLBeaconCountryOverflow", awdlBeaconCountryOverflow, 32);
+        root->setProperty("AwTxWindowFullExits", awdlTxWindowFullExits, 32);
+        root->setProperty("AwTxStackEmptyExits", awdlTxStackEmptyExits, 32);
+        if (auto *o = OSData::withBytes(awdlSlots6Frames, sizeof(awdlSlots6Frames))) { root->setProperty("AwSlots6Frames", o); o->release(); }
+        if (auto *o = OSData::withBytes(awdlSlotChanges, unsigned(awdlSlotChangeCount * sizeof(awdlSlotChanges[0])))) { root->setProperty("AwSlotChanges", o); o->release(); }
+        root->setProperty("AwPeerCountryFrames", awdlPeerCountryFrames, 32);
+        root->setProperty("AwPeerCountryChanges", awdlPeerCountry.changes, 32);
+        root->setProperty("AwPeerCountryConfirmed", awdlPeerCountry.confirmed, 32);
+        root->setProperty("AwPeerCountryAsked", awdlPeerCountryAsked ? 1ULL : 0ULL, 32);
+        root->setProperty("AwBeaconCountryOverflow", awdlBeaconCountryOverflow, 32);
         if (auto *beacons = OSData::withBytes(awdlBeaconCountries, unsigned(awdlBeaconCountryCount * sizeof(awdlBeaconCountries[0])))) {
-            root->setProperty("ITLAWDLBeaconCountries", beacons);
+            root->setProperty("AwBeaconCountries", beacons);
             beacons->release();
         }
         if (awdlBaProbe) {
-            root->setProperty("ITLAWDLBaStep", awdlBaStep, 32);
-            root->setProperty("ITLAWDLBaRequests", awdlBaRequests, 32);
-            root->setProperty("ITLAWDLBaOtherPeer", awdlBaOtherPeer, 32);
-            root->setProperty("ITLAWDLBaStationStatus", awdlBaStationStatus, 32);
-            root->setProperty("ITLAWDLBaSessionStatus", awdlBaSessionStatus, 32);
-            root->setProperty("ITLAWDLBaTids", awdlBaTids, 32);
-            root->setProperty("ITLAWDLBaResponsesSent", awdlBaResponsesSent, 32);
-            root->setProperty("ITLAWDLBaResponsesAcked", awdlBaResponsesAcked, 32);
-            root->setProperty("ITLAWDLBaResponseLastStatus", awdlBaResponseLastStatus, 32);
-            root->setProperty("ITLAWDLBaRxAmpdu", awdlBaRxAmpdu, 32);
-            root->setProperty("ITLAWDLBaStale", awdlBaStale, 32);
-            root->setProperty("ITLAWDLBaAttempts", awdlBaAttempts, 32);
-            root->setProperty("ITLAWDLBaBssidResult", awdlBaBssidResult, 32);
-            root->setProperty("ITLAWDLBaMacType", awdlBaMacType, 32);
-            root->setProperty("ITLAWDLRxNoFcs", awdlRxNoFcs, 32);
-            root->setProperty("ITLAWDLBaMacAdds", awdlBaMacAdds, 32);
-            root->setProperty("ITLAWDLBaMacFellBack", awdlBaMacFellBack, 32);
-            root->setProperty("ITLAWDLBaNoPromisc", awdlBaNoPromisc ? 1U : 0U, 32);
-            root->setProperty("ITLAWDLBaFilterOff", awdlBaFilterOff ? 1U : 0U, 32);
-            root->setProperty("ITLAWDLBaFilterChanges", awdlBaFilterChanges, 32);
+            root->setProperty("AwBaStep", awdlBaStep, 32);
+            root->setProperty("AwBaRequests", awdlBaRequests, 32);
+            root->setProperty("AwBaOtherPeer", awdlBaOtherPeer, 32);
+            root->setProperty("AwBaStationStatus", awdlBaStationStatus, 32);
+            root->setProperty("AwBaSessionStatus", awdlBaSessionStatus, 32);
+            root->setProperty("AwBaTids", awdlBaTids, 32);
+            root->setProperty("AwBaResponsesSent", awdlBaResponsesSent, 32);
+            root->setProperty("AwBaResponsesAcked", awdlBaResponsesAcked, 32);
+            root->setProperty("AwBaResponseLastStatus", awdlBaResponseLastStatus, 32);
+            root->setProperty("AwBaRxAmpdu", awdlBaRxAmpdu, 32);
+            root->setProperty("AwBaStale", awdlBaStale, 32);
+            root->setProperty("AwBaAttempts", awdlBaAttempts, 32);
+            root->setProperty("AwBaBssidResult", awdlBaBssidResult, 32);
+            root->setProperty("AwBaMacType", awdlBaMacType, 32);
+            root->setProperty("AwRxNoFcs", awdlRxNoFcs, 32);
+            root->setProperty("AwBaMacAdds", awdlBaMacAdds, 32);
+            root->setProperty("AwBaMacFellBack", awdlBaMacFellBack, 32);
+            root->setProperty("AwBaNoPromisc", awdlBaNoPromisc ? 1U : 0U, 32);
+            root->setProperty("AwBaFilterOff", awdlBaFilterOff ? 1U : 0U, 32);
+            root->setProperty("AwBaFilterChanges", awdlBaFilterChanges, 32);
             if (awdlBaTx) {
-                root->setProperty("ITLAWDLBaTxState", awdlBaTxState, 32);
-                root->setProperty("ITLAWDLBaTxAgg", awdlBaTxAgg, 32);
-                root->setProperty("ITLAWDLBaRxDelba", awdlBaRxDelba, 32);
-                root->setProperty("ITLAWDLBaSessionRestarts", awdlBaSessionRestarts, 32);
-                root->setProperty("ITLAWDLBaTxQueuedMax", awdlBaTxQueuedMax, 32);
-                root->setProperty("ITLAWDLBaTxQueue", uint32_t(awdlBaTxQueue + 1), 32);
-                root->setProperty("ITLAWDLBaTxQueueResult", awdlBaTxQueueResult, 32);
-                root->setProperty("ITLAWDLBaTxAsks", awdlBaTxAsks, 32);
-                root->setProperty("ITLAWDLBaTxAnswerStatus", awdlBaTxAnswerStatus, 32);
-                root->setProperty("ITLAWDLBaTxFrames", awdlBaTxFrames, 32);
-                root->setProperty("ITLAWDLBaTxNotifs", awdlBaTxNotifs, 32);
-                root->setProperty("ITLAWDLBaTxAskRounds", awdlBaTxAskRounds, 32);
-                root->setProperty("ITLAWDLMacApplies", awdlMacApplies, 32);
-                root->setProperty("ITLAWDLMacApplyFailures", awdlMacApplyFailures, 32);
-                root->setProperty("ITLAWDLMacAddressChanges", awdlMacAddressChanges, 32);
-                root->setProperty("ITLAWDLBaTxAsksSkippedAway", awdlBaTxAsksSkippedAway, 32);
+                root->setProperty("AwBaTxState", awdlBaTxState, 32);
+                root->setProperty("AwBaTxAgg", awdlBaTxAgg, 32);
+                root->setProperty("AwBaRxDelba", awdlBaRxDelba, 32);
+                root->setProperty("AwBaSessionRestarts", awdlBaSessionRestarts, 32);
+                root->setProperty("AwBaTxQueuedMax", awdlBaTxQueuedMax, 32);
+                root->setProperty("AwBaTxQueue", uint32_t(awdlBaTxQueue + 1), 32);
+                root->setProperty("AwBaTxQueueResult", awdlBaTxQueueResult, 32);
+                root->setProperty("AwBaTxAsks", awdlBaTxAsks, 32);
+                root->setProperty("AwBaTxAnswerStatus", awdlBaTxAnswerStatus, 32);
+                root->setProperty("AwBaTxFrames", awdlBaTxFrames, 32);
+                root->setProperty("AwBaTxNotifs", awdlBaTxNotifs, 32);
+                root->setProperty("AwBaTxAskRounds", awdlBaTxAskRounds, 32);
+                root->setProperty("AwMacApplies", awdlMacApplies, 32);
+                root->setProperty("AwMacApplyFailures", awdlMacApplyFailures, 32);
+                root->setProperty("AwMacAddressChanges", awdlMacAddressChanges, 32);
+                root->setProperty("AwBaTxAsksSkippedAway", awdlBaTxAsksSkippedAway, 32);
                 if (awdlBaTx80) {
-                    root->setProperty("ITLAWDLBaTx80State", awdlBaTx80State, 32);
-                    root->setProperty("ITLAWDLBaTxMinMcs", awdlBaTxMinMcs, 32);
+                    root->setProperty("AwBaTx80State", awdlBaTx80State, 32);
+                    root->setProperty("AwBaTxMinMcs", awdlBaTxMinMcs, 32);
                 }
                 if (awdlBaTxFixedMcs >= 0) {
-                    root->setProperty("ITLAWDLBaTxFixedMcs", uint32_t(awdlBaTxFixedMcs), 32);
-                    root->setProperty("ITLAWDLBaTxFixedFrames", awdlBaTxFixedFrames, 32);
+                    root->setProperty("AwBaTxFixedMcs", uint32_t(awdlBaTxFixedMcs), 32);
+                    root->setProperty("AwBaTxFixedFrames", awdlBaTxFixedFrames, 32);
                 }
-                root->setProperty("ITLAWDLBaTxSentAir", awdlBaTxSentAir, 32);
-                root->setProperty("ITLAWDLBaTxAcked", awdlBaTxAcked, 32);
-                root->setProperty("ITLAWDLBaTxSingles", awdlBaTxSingles, 32);
-                root->setProperty("ITLAWDLBaTxDelba", awdlBaTxDelba, 32);
-                root->setProperty("ITLAWDLBaTxRefused", awdlBaTxRefused, 32);
-                root->setProperty("ITLAWDLBaTxBulk", awdlBaTxBulk.bulk ? 1U : 0U, 32);
-                root->setProperty("ITLAWDLBaTxBulkChanges", awdlBaTxBulkChanges, 32);
-                root->setProperty("ITLAWDLBaTxBulkSkipped", awdlBaTxBulkSkipped, 32);
+                root->setProperty("AwBaTxSentAir", awdlBaTxSentAir, 32);
+                root->setProperty("AwBaTxAcked", awdlBaTxAcked, 32);
+                root->setProperty("AwBaTxSingles", awdlBaTxSingles, 32);
+                root->setProperty("AwBaTxDelba", awdlBaTxDelba, 32);
+                root->setProperty("AwBaTxRefused", awdlBaTxRefused, 32);
+                root->setProperty("AwBaTxBulk", awdlBaTxBulk.bulk ? 1U : 0U, 32);
+                root->setProperty("AwBaTxBulkChanges", awdlBaTxBulkChanges, 32);
+                root->setProperty("AwBaTxBulkSkipped", awdlBaTxBulkSkipped, 32);
             }
-            root->setProperty("ITLAWDLBaOffChannel", awdlBaOffChannel, 32);
-            root->setProperty("ITLAWDLBaResponsesDone", awdlBaResponsesDone, 32);
-            root->setProperty("ITLAWDLBaResponsesRefused", awdlBaResponsesRefused, 32);
+            root->setProperty("AwBaOffChannel", awdlBaOffChannel, 32);
+            root->setProperty("AwBaResponsesDone", awdlBaResponsesDone, 32);
+            root->setProperty("AwBaResponsesRefused", awdlBaResponsesRefused, 32);
         }
         if (awdlRx) {
             const auto &rxCounts = awdlRxSequences.counts;
             if (auto *rxData = OSData::withBytes(&rxCounts, sizeof(rxCounts))) {
-                root->setProperty("ITLAWDLRxSequences", rxData);
+                root->setProperty("AwRxSequences", rxData);
                 rxData->release();
             }
-            root->setProperty("ITLAWDLBaBarReleases", awdlBaBarReleases, 32);
+            root->setProperty("AwBaBarReleases", awdlBaBarReleases, 32);
         }
-        root->setProperty("ITLAWDLCountryNotices", awdlCountryNotices, 32);
-        root->setProperty("ITLAWDLCountryAnswers", awdlCountryAnswers, 32);
-        root->setProperty("ITLAWDLCountryLastStatus", awdlCountryLastStatus, 32);
-        root->setProperty("ITLAWDLCountryLastAnswered", awdlCountryLastAnswered, 32);
-        root->setProperty("ITLAWDLChannel149Flags", that->com.sc_ic.ic_channels[149].ic_flags, 32);
+        root->setProperty("AwCountryNotices", awdlCountryNotices, 32);
+        root->setProperty("AwCountryAnswers", awdlCountryAnswers, 32);
+        root->setProperty("AwCountryLastStatus", awdlCountryLastStatus, 32);
+        root->setProperty("AwCountryLastAnswered", awdlCountryLastAnswered, 32);
+        root->setProperty("AwChannel149Flags", that->com.sc_ic.ic_channels[149].ic_flags, 32);
         if (awdlDataTx) {
-            root->setProperty("ITLAWDLTxMulticastSent", awdlDataSent[0], 32);
-            root->setProperty("ITLAWDLTxUnicastSent", awdlDataSent[1], 32);
-            root->setProperty("ITLAWDLTxUnicastOK", awdlDataOK[1], 32);
-            root->setProperty("ITLAWDLTxUnicastFail", awdlDataFailed[1], 32);
-            root->setProperty("ITLAWDLTxLastFailure", awdlDataLastFailure, 32);
-            if (ItlAWDL::knownAddress(awdlLastPeer)) {
+            root->setProperty("AwTxMulticastSent", awdlDataSent[0], 32);
+            root->setProperty("AwTxUnicastSent", awdlDataSent[1], 32);
+            root->setProperty("AwTxUnicastOK", awdlDataOK[1], 32);
+            root->setProperty("AwTxUnicastFail", awdlDataFailed[1], 32);
+            root->setProperty("AwTxLastFailure", awdlDataLastFailure, 32);
+            if (Aw::knownAddress(awdlLastPeer)) {
                 uint8_t peerIP[16];
-                if (ItlAWDL::sameAddress(awdlLearnedPeer, awdlLastPeer))
+                if (Aw::sameAddress(awdlLearnedPeer, awdlLastPeer))
                     memcpy(peerIP, awdlLearnedPeerIP, sizeof(peerIP));
                 else
-                    ItlAWDL::linkLocalFromAddress(awdlLastPeer, peerIP);
+                    Aw::linkLocalFromAddress(awdlLastPeer, peerIP);
                 if (auto *address = OSData::withBytes(peerIP, sizeof(peerIP))) {
-                    root->setProperty("ITLAWDLPeerLinkLocal", address);
+                    root->setProperty("AwPeerLinkLocal", address);
                     address->release();
                 }
             }
         }
-        root->setProperty("ITLAWDLHeardEchoReply", awdlSeen.dataEchoReply, 32);
-        root->setProperty("ITLAWDLHeardNeighborAdvert", awdlSeen.dataNeighbor, 32);
-        root->setProperty("ITLAWDLHeardNeighborSolicit", awdlSeen.dataSolicit, 32);
+        root->setProperty("AwHeardEchoReply", awdlSeen.dataEchoReply, 32);
+        root->setProperty("AwHeardNeighborAdvert", awdlSeen.dataNeighbor, 32);
+        root->setProperty("AwHeardNeighborSolicit", awdlSeen.dataSolicit, 32);
         if (awdlServiceLog.dirty) {
             // Only when something changed: this is about 16 KB.
             awdlServiceLog.dirty = false;
-            constexpr uint32_t kept = ItlAWDL::ServiceSnapshotLog::kEntries;
+            constexpr uint32_t kept = Aw::ServiceSnapshotLog::kEntries;
             const uint32_t held = awdlServiceLog.total < kept ? awdlServiceLog.total : kept;
             const uint32_t start = awdlServiceLog.total < kept ? 0 : awdlServiceLog.total % kept;
-            static ItlAWDL::ServiceSnapshot ordered[kept];
+            static Aw::ServiceSnapshot ordered[kept];
             for (uint32_t i = 0; i < held; ++i)
                 ordered[i] = awdlServiceLog.entries[(start + i) % kept];
             if (auto *changes = OSData::withBytes(ordered, unsigned(held * sizeof(ordered[0])))) {
-                root->setProperty("ITLAWDLServiceChanges", changes);
+                root->setProperty("AwServiceChanges", changes);
                 changes->release();
             }
-            root->setProperty("ITLAWDLServiceChangeTotal", awdlServiceLog.total, 32);
+            root->setProperty("AwServiceChangeTotal", awdlServiceLog.total, 32);
         }
         if (awdlNoPeerPsf)
-            root->setProperty("ITLAWDLPeerPsfKept", awdlPeerPsfKept, 32);
+            root->setProperty("AwPeerPsfKept", awdlPeerPsfKept, 32);
         if (awdlWide80) {
-            root->setProperty("ITLAWDLWide80State", awdlWide80State, 32);
-            root->setProperty("ITLAWDLWide80Error", awdlWide80Error, 32);
-            root->setProperty("ITLAWDLWide80Live", awdlWide80Live);
+            root->setProperty("AwWide80State", awdlWide80State, 32);
+            root->setProperty("AwWide80Error", awdlWide80Error, 32);
+            root->setProperty("AwWide80Live", awdlWide80Live);
             if (awdlTx80) {
-                root->setProperty("ITLAWDLTx80Requested", awdlTx80Requested, 32);
-                root->setProperty("ITLAWDLTx80Completed", awdlTx80Completed, 32);
-                root->setProperty("ITLAWDLTx80Reported", awdlTx80Reported, 32);
-                root->setProperty("ITLAWDLTx80Acked", awdlTx80Acked, 32);
-                root->setProperty("ITLAWDLTx80Disabled", awdlTx80ConsecutiveMisses >= 8 ? 1U : 0U, 32);
+                root->setProperty("AwTx80Requested", awdlTx80Requested, 32);
+                root->setProperty("AwTx80Completed", awdlTx80Completed, 32);
+                root->setProperty("AwTx80Reported", awdlTx80Reported, 32);
+                root->setProperty("AwTx80Acked", awdlTx80Acked, 32);
+                root->setProperty("AwTx80Disabled", awdlTx80ConsecutiveMisses >= 8 ? 1U : 0U, 32);
             }
             if (awdlAdvertise80)
-                root->setProperty("ITLAWDLAdvertise80Frames", awdlAdvertise80Frames, 32);
+                root->setProperty("AwAdvertise80Frames", awdlAdvertise80Frames, 32);
         }
         if (awdlServiceMerge) {
-            root->setProperty("ITLAWDLSvcMergedFrames", awdlServiceMergedFrames, 32);
-            root->setProperty("ITLAWDLSvcMergedRecords", awdlServiceMergedRecords, 32);
-            root->setProperty("ITLAWDLSvcMergeRefused", awdlServiceMergeRefused, 32);
-            root->setProperty("ITLAWDLSvcMergeLastError", awdlServiceMergeLastError, 32);
-            root->setProperty("ITLAWDLSvcCacheRecords", awdlServiceCache.records, 32);
-            root->setProperty("ITLAWDLSvcCacheResets", awdlServiceCache.resets, 32);
-            root->setProperty("ITLAWDLSvcCacheOverflow", awdlServiceCache.overflow, 32);
+            root->setProperty("AwSvcMergedFrames", awdlServiceMergedFrames, 32);
+            root->setProperty("AwSvcMergedRecords", awdlServiceMergedRecords, 32);
+            root->setProperty("AwSvcMergeRefused", awdlServiceMergeRefused, 32);
+            root->setProperty("AwSvcMergeLastError", awdlServiceMergeLastError, 32);
+            root->setProperty("AwSvcCacheRecords", awdlServiceCache.records, 32);
+            root->setProperty("AwSvcCacheResets", awdlServiceCache.resets, 32);
+            root->setProperty("AwSvcCacheOverflow", awdlServiceCache.overflow, 32);
         }
         if (awdlMcastUnicast) {
-            root->setProperty("ITLAWDLMcastUnicastCopies", awdlMcastUnicastCopies, 32);
-            root->setProperty("ITLAWDLMcastUnicastSkipped", awdlMcastUnicastSkipped, 32);
+            root->setProperty("AwMcastUnicastCopies", awdlMcastUnicastCopies, 32);
+            root->setProperty("AwMcastUnicastSkipped", awdlMcastUnicastSkipped, 32);
         }
         if (auto *tlvs = OSData::withBytes(awdlPeerTLVs, sizeof(awdlPeerTLVs))) {
-            root->setProperty("ITLAWDLPeerTLVCounts", tlvs);
+            root->setProperty("AwPeerTLVCounts", tlvs);
             tlvs->release();
         }
-        root->setProperty("ITLAWDLAirAckToAWDL", awdlAir.ackToAWDL, 32);
-        root->setProperty("ITLAWDLAirAckToHardware", awdlAir.ackToHardware, 32);
-        root->setProperty("ITLAWDLAirUnicastToUs", awdlAir.unicastToUs, 32);
-        root->setProperty("ITLAWDLAirUnicastToUsRetried", awdlAir.unicastToUsRetried, 32);
-        root->setProperty("ITLAWDLAirAckToForeign", awdlAir.ackToForeign, 32);
-        root->setProperty("ITLAWDLAirUnicastToForeign", awdlAir.unicastToForeign, 32);
-        root->setProperty("ITLAWDLAirUnicastToForeignRetried", awdlAir.unicastToForeignRetried, 32);
-        root->setProperty("ITLAWDLSkipChained", awdlDataSkips.chained, 32);
-        root->setProperty("ITLAWDLSkipFrameType", awdlDataSkips.frameType, 32);
-        root->setProperty("ITLAWDLSkipBssid", awdlDataSkips.bssid, 32);
-        root->setProperty("ITLAWDLSkipLlc", awdlDataSkips.llc, 32);
-        root->setProperty("ITLAWDLSkipOther", awdlDataSkips.other, 32);
-        root->setProperty("ITLAWDLSkipRetried", awdlDataSkips.retried, 32);
-        root->setProperty("ITLAWDLRxOuterHeader", awdlDataSkips.outerHeader, 32);
-        root->setProperty("ITLAWDLRxRatesOverflow", awdlRxRatesOverflow, 32);
+        root->setProperty("AwAirAckToAWDL", awdlAir.ackToAWDL, 32);
+        root->setProperty("AwAirAckToHardware", awdlAir.ackToHardware, 32);
+        root->setProperty("AwAirUnicastToUs", awdlAir.unicastToUs, 32);
+        root->setProperty("AwAirUnicastToUsRetried", awdlAir.unicastToUsRetried, 32);
+        root->setProperty("AwAirAckToForeign", awdlAir.ackToForeign, 32);
+        root->setProperty("AwAirUnicastToForeign", awdlAir.unicastToForeign, 32);
+        root->setProperty("AwAirUnicastToForeignRetried", awdlAir.unicastToForeignRetried, 32);
+        root->setProperty("AwSkipChained", awdlDataSkips.chained, 32);
+        root->setProperty("AwSkipFrameType", awdlDataSkips.frameType, 32);
+        root->setProperty("AwSkipBssid", awdlDataSkips.bssid, 32);
+        root->setProperty("AwSkipLlc", awdlDataSkips.llc, 32);
+        root->setProperty("AwSkipOther", awdlDataSkips.other, 32);
+        root->setProperty("AwSkipRetried", awdlDataSkips.retried, 32);
+        root->setProperty("AwRxOuterHeader", awdlDataSkips.outerHeader, 32);
+        root->setProperty("AwRxRatesOverflow", awdlRxRatesOverflow, 32);
         if (auto *rxRates = OSData::withBytes(awdlRxRates, sizeof(awdlRxRates))) {
-            root->setProperty("ITLAWDLRxRates", rxRates);
+            root->setProperty("AwRxRates", rxRates);
             rxRates->release();
         }
         if (auto *skipped = OSData::withBytes(awdlDataSkips.skippedLengths, sizeof(awdlDataSkips.skippedLengths))) {
-            root->setProperty("ITLAWDLSkipLengths", skipped);
+            root->setProperty("AwSkipLengths", skipped);
             skipped->release();
         }
         if (auto *parsedLengths = OSData::withBytes(awdlDataSkips.parsedLengths, sizeof(awdlDataSkips.parsedLengths))) {
-            root->setProperty("ITLAWDLParsedLengths", parsedLengths);
+            root->setProperty("AwParsedLengths", parsedLengths);
             parsedLengths->release();
         }
         if (auto *types = OSData::withBytes(awdlAir.typesToUs, sizeof(awdlAir.typesToUs))) {
-            root->setProperty("ITLAWDLAirTypesToUs", types);
+            root->setProperty("AwAirTypesToUs", types);
             types->release();
         }
         if (awdlPeerProbeCount) {
@@ -9693,13 +9693,13 @@ awdlRxTask(void *arg)
                 used += snprintf(table + used, sizeof(table) - used, "..:%02x:%02x acks %u of %u rssi %d; ",
                                  p.address[4], p.address[5], p.acked, p.tries, p.rssi);
             }
-            root->setProperty("ITLAWDLAckPeers", table);
+            root->setProperty("AwAckPeers", table);
         }
         if (awdlAckProbe) {
-            static const char *const acked[] = {"ITLAWDLAckPeerAWDLOK", "ITLAWDLAckPeerHardwareOK", "ITLAWDLAckControlAWDLOK", "ITLAWDLAckControlHardwareOK", "ITLAWDLAckPeerNeighborOK", "ITLAWDLAckPeerEchoOK", "ITLAWDLAckPeerForeignOK"};
-            static const char *const failed[] = {"ITLAWDLAckPeerAWDLFail", "ITLAWDLAckPeerHardwareFail", "ITLAWDLAckControlAWDLFail", "ITLAWDLAckControlHardwareFail", "ITLAWDLAckPeerNeighborFail", "ITLAWDLAckPeerEchoFail", "ITLAWDLAckPeerForeignFail"};
-            static const char *const retries[] = {"ITLAWDLAckPeerAWDLRetries", "ITLAWDLAckPeerHardwareRetries", "ITLAWDLAckControlAWDLRetries", "ITLAWDLAckControlHardwareRetries", "ITLAWDLAckPeerNeighborRetries", "ITLAWDLAckPeerEchoRetries", "ITLAWDLAckPeerForeignRetries"};
-            static const char *const last[] = {"ITLAWDLAckPeerAWDLLastFailure", "ITLAWDLAckPeerHardwareLastFailure", "ITLAWDLAckControlAWDLLastFailure", "ITLAWDLAckControlHardwareLastFailure", "ITLAWDLAckPeerNeighborLastFailure", "ITLAWDLAckPeerEchoLastFailure", "ITLAWDLAckPeerForeignLastFailure"};
+            static const char *const acked[] = {"AwAckPeerAWDLOK", "AwAckPeerHardwareOK", "AwAckControlAWDLOK", "AwAckControlHardwareOK", "AwAckPeerNeighborOK", "AwAckPeerEchoOK", "AwAckPeerForeignOK"};
+            static const char *const failed[] = {"AwAckPeerAWDLFail", "AwAckPeerHardwareFail", "AwAckControlAWDLFail", "AwAckControlHardwareFail", "AwAckPeerNeighborFail", "AwAckPeerEchoFail", "AwAckPeerForeignFail"};
+            static const char *const retries[] = {"AwAckPeerAWDLRetries", "AwAckPeerHardwareRetries", "AwAckControlAWDLRetries", "AwAckControlHardwareRetries", "AwAckPeerNeighborRetries", "AwAckPeerEchoRetries", "AwAckPeerForeignRetries"};
+            static const char *const last[] = {"AwAckPeerAWDLLastFailure", "AwAckPeerHardwareLastFailure", "AwAckControlAWDLLastFailure", "AwAckControlHardwareLastFailure", "AwAckPeerNeighborLastFailure", "AwAckPeerEchoLastFailure", "AwAckPeerForeignLastFailure"};
             for (unsigned i = 0; i < 7; i++) {
                 root->setProperty(acked[i], awdlAcks.acked[i], 32);
                 root->setProperty(failed[i], awdlAcks.failed[i], 32);
@@ -9770,28 +9770,28 @@ awdlRxTask(void *arg)
         const bool ask = !awdlPeerCountryAsked && awdlPeerCountry.confirmed && awdlPeerAudible();
         const bool read = awdlPeerCountryAsked && awdlPeerCountryReads < 6 && now - awdlPeerCountryAskSeconds >= 30U * (awdlPeerCountryReads + 1);
         if (ask || read) {
-            ItlAWDL::MccSample sample{};
+            Aw::MccSample sample{};
             sample.uptimeSeconds = now;
             sample.state = uint8_t(that->com.sc_ic.ic_state);
-            sample.trigger = ask ? ItlAWDL::kMccPeerReply : ItlAWDL::kMccRead;
+            sample.trigger = ask ? Aw::kMccPeerReply : Aw::kMccRead;
             int err;
             if (ask) {
                 awdlPeerCountryAsked = true;
                 awdlPeerCountryAskSeconds = now;
-                err = that->iwx_mcc_request(sc, awdlPeerCountry.confirmed, ItlAWDL::kMccSourceWifi, &sample, false);
+                err = that->iwx_mcc_request(sc, awdlPeerCountry.confirmed, Aw::kMccSourceWifi, &sample, false);
             } else {
                 ++awdlPeerCountryReads;
                 err = that->iwx_mcc_request(sc, 'Z' << 8 | 'Z', IWX_MCC_SOURCE_GET_CURRENT, &sample, false);
             }
             if (!err)
-                ItlAWDL::regulatoryAppend(mccSamples, nitems(mccSamples), mccSampleCount, sample);
+                Aw::regulatoryAppend(mccSamples, nitems(mccSamples), mccSampleCount, sample);
             if (ask) {
-                ItlAWDL::MccSample after{};
+                Aw::MccSample after{};
                 after.uptimeSeconds = now;
                 after.state = sample.state;
-                after.trigger = ItlAWDL::kMccRead;
+                after.trigger = Aw::kMccRead;
                 if (that->iwx_mcc_request(sc, 'Z' << 8 | 'Z', IWX_MCC_SOURCE_GET_CURRENT, &after, false) == 0)
-                    ItlAWDL::regulatoryAppend(mccSamples, nitems(mccSamples), mccSampleCount, after);
+                    Aw::regulatoryAppend(mccSamples, nitems(mccSamples), mccSampleCount, after);
             }
             mccProbePublish();
         }
@@ -9803,7 +9803,7 @@ awdlRxTask(void *arg)
             awdlTxBusySinceUS = 0;
         else if (!awdlTxBusySinceUS)
             awdlTxBusySinceUS = stallNow;
-        if (ItlAWDL::txStalled(busy, stallNow, awdlTxBusySinceUS, awdlTxLastCompletionUS)) {
+        if (Aw::txStalled(busy, stallNow, awdlTxBusySinceUS, awdlTxLastCompletionUS)) {
             // Record it, then restart the card, the same recovery as a firmware fault. If it
             // happens twice, the window isn't safe here, so go back to one frame at a time.
             auto *ring = that->awdlMonitorQueue >= 0 ? &sc->txq[that->awdlMonitorQueue] : nullptr;
@@ -9817,12 +9817,12 @@ awdlRxTask(void *arg)
             }
             auto *root = IORegistryEntry::getRegistryRoot();
             if (auto *stalls = OSData::withBytes(awdlTxStalls, unsigned(awdlTxStallCount * sizeof(awdlTxStalls[0])))) {
-                root->setProperty("ITLAWDLTxStalls", stalls);
+                root->setProperty("AwTxStalls", stalls);
                 stalls->release();
             }
             if (awdlTxStallCount >= 2) {
                 awdlWindow = 1;
-                root->setProperty("ITLAWDLTxWindow", awdlWindow, 32);
+                root->setProperty("AwTxWindow", awdlWindow, 32);
             }
             awdlTxBusySinceUS = 0;
             task_add(systq, &sc->init_task);
@@ -9830,14 +9830,14 @@ awdlRxTask(void *arg)
         }
     }
     if (running && awdlTx80)
-        ItlAWDL::noteBaTxTraffic(awdlTx80Bulk, awdlUptimeUS(), awdlDataSent[1]);
+        Aw::noteBaTxTraffic(awdlTx80Bulk, awdlUptimeUS(), awdlDataSent[1]);
     if (running && awdlBaPending) {
         awdlBaPending = false;
         that->awdlBaHandle(sc);
     }
     if (running && awdlBaTx) {
         that->awdlBaTxStep(sc);
-        if (ItlAWDL::noteBaTxTraffic(awdlBaTxBulk, awdlUptimeUS(), awdlDataSent[1] + awdlBaTxFrames))
+        if (Aw::noteBaTxTraffic(awdlBaTxBulk, awdlUptimeUS(), awdlDataSent[1] + awdlBaTxFrames))
             ++awdlBaTxBulkChanges;
     }
     bool awdlFilterChange = false;
@@ -9846,7 +9846,7 @@ awdlRxTask(void *arg)
             awdlFilterChange = !awdlBaFilter.off;
             awdlBaFilter.off = true;
         } else {
-            awdlFilterChange = ItlAWDL::noteBaFilterTraffic(awdlBaFilter, awdlUptimeUS(), awdlRxSequences.counts.frames);
+            awdlFilterChange = Aw::noteBaFilterTraffic(awdlBaFilter, awdlUptimeUS(), awdlRxSequences.counts.frames);
         }
     }
     if (awdlFilterChange) {
@@ -9874,22 +9874,22 @@ awdlRxTask(void *arg)
             awdlChannelMove.lastMoveMs = uint32_t((moveNow - awdlChannelMove.moveStartUS) / 1000);
             awdlChannelMove.moveStartUS = 0;
         }
-        if (ItlAWDL::forcedMoveDue(awdlMoveTestSeconds, awdlMoveTestDone, awdlFixedChannel, moveNow)) {
+        if (Aw::forcedMoveDue(awdlMoveTestSeconds, awdlMoveTestDone, awdlFixedChannel, moveNow)) {
             awdlMoveTestDone = true;
             awdlChannelMove.wantDown = true;
         }
         if (awdlChannelMove.upNoticed && awdlFixedChannel != 149 &&
-            ItlAWDL::channelMoveUpAllowed(moveNow, awdlChannelMove.lastUpUS)) {
+            Aw::channelMoveUpAllowed(moveNow, awdlChannelMove.lastUpUS)) {
             awdlChannelMove.upNoticed = false;
             awdlChannelMove.wantUp = true;
         }
         const bool busy = that->awdlMonitorPending || awdlBurst.count || awdlBurst.retryCount || awdlResend.held;
-        if (awdlBackgroundScanActive && moveNow - awdlBackgroundScanStartUS >= ItlAWDL::kBackgroundScanLimitUS) {
+        if (awdlBackgroundScanActive && moveNow - awdlBackgroundScanStartUS >= Aw::kBackgroundScanLimitUS) {
             (void)that->iwx_umac_scan_abort(sc);
             awdlBackgroundScanActive = false;
         }
         if (!awdlBackgroundScanActive && (awdlChannelMove.wantUp || awdlChannelMove.wantDown) &&
-            ItlAWDL::channelMoveReady(busy, moveNow, awdlLastDataUS)) {
+            Aw::channelMoveReady(busy, moveNow, awdlLastDataUS)) {
             if (awdlChannelMove.wantDown) {
                 awdlChannelMove.skipStartupScan = true;
                 ++awdlMovesDown;
@@ -9903,7 +9903,7 @@ awdlRxTask(void *arg)
             return;
         }
         if (!awdlBackgroundScanActive && !awdlChannelMove.wantUp && !awdlChannelMove.wantDown &&
-            ItlAWDL::backgroundScanDue(awdlFixedChannel != 149, busy, moveNow, awdlChannelMove.lastScanUS, awdlLastDataUS)) {
+            Aw::backgroundScanDue(awdlFixedChannel != 149, busy, moveNow, awdlChannelMove.lastScanUS, awdlLastDataUS)) {
             awdlChannelMove.lastScanUS = moveNow;
             ++awdlBackgroundScans;
             awdlBackgroundScanStartUS = moveNow;
@@ -9933,20 +9933,20 @@ awdlRxTask(void *arg)
     if (running)
         that->iwx_awdl_transport_probe(sc);
     unsigned nextDelay = awdlPeerTrain ?
-        ItlAWDL::peerTrainDelayUS(that->awdlMonitorSubmitted, awdlPeerAudible(),
+        Aw::peerTrainDelayUS(that->awdlMonitorSubmitted, awdlPeerAudible(),
             that->awdlMonitorPending != nullptr, that->awdlMonitorTxAttempted) :
-        ItlAWDL::probeDelayUS(awdlFastProbe,
+        Aw::probeDelayUS(awdlFastProbe,
             that->awdlMonitorSubmitted, that->awdlMonitorPending != nullptr, that->awdlMonitorTxAttempted);
-#if defined(ITL_AWDL_NATIVE)
+#if defined(AW_NATIVE)
     if (awdlDataTx)
         // Output arrives without notice, so never sleep for long while it's on.
         nextDelay = MIN(nextDelay, (itlAWDLServiceTransmit(that->getController()) ||
-            ItlAWDL::dataRecentlyActive(awdlDataEverActive, awdlUptimeUS(), awdlLastDataUS)) ? 1000U : 50000U);
+            Aw::dataRecentlyActive(awdlDataEverActive, awdlUptimeUS(), awdlLastDataUS)) ? 1000U : 50000U);
 #endif
     // A pause has to end on time even with nothing else to do.
     if (awdlPeerPause && (awdlPeerPauseState.paused || awdlPeerSchedule.calibrated))
         nextDelay = MIN(nextDelay, 1000U);
-    if (awdlAwSync && !ItlAWDL::dataRecentlyActive(awdlDataEverActive, awdlUptimeUS(), awdlLastDataUS)) {
+    if (awdlAwSync && !Aw::dataRecentlyActive(awdlDataEverActive, awdlUptimeUS(), awdlLastDataUS)) {
         // Wake for the peer's next AW on our channel, not every millisecond.
         const uint64_t untilAW = awdlPeerSchedule.usUntilPresentAw(awdlUptimeUS());
         if (untilAW)
@@ -9981,10 +9981,10 @@ iwx_rx_frame(struct iwx_softc *sc, mbuf_t m, int chanidx,
         // Eavesdrop: classify by source and destination while promiscuous receive is open. A unicast frame
         // between two other peers is the reference case — Apple's stack sending to a second destination from
         // the same radio. Read-only: the counts go nowhere near a sending decision.
-        if (awdlCoexBaFilterOff && awdlCoexAddrKnown && !ItlAWDL::sameAddress(cf + 10, awdlCoexAddr)) {
+        if (awdlCoexBaFilterOff && awdlCoexAddrKnown && !Aw::sameAddress(cf + 10, awdlCoexAddr)) {
             if (cf[4] & 1) {
                 ++awdlCoexSniffGroup;
-            } else if (ItlAWDL::sameAddress(cf + 4, awdlCoexAddr)) {
+            } else if (Aw::sameAddress(cf + 4, awdlCoexAddr)) {
                 ++awdlCoexSniffToUs;
             } else {
                 const uint64_t sniffUS = awdlUptimeUS();
@@ -9995,8 +9995,8 @@ iwx_rx_frame(struct iwx_softc *sc, mbuf_t m, int chanidx,
                     ++awdlCoexSniffActionsRelayed;
                 unsigned pair = kAwdlCoexSniffPeers;
                 for (unsigned k = 0; k < awdlCoexSniffUsed; ++k)
-                    if (ItlAWDL::sameAddress(cf + 10, awdlCoexSniffTable[k].src) &&
-                        ItlAWDL::sameAddress(cf + 4, awdlCoexSniffTable[k].dst)) {
+                    if (Aw::sameAddress(cf + 10, awdlCoexSniffTable[k].src) &&
+                        Aw::sameAddress(cf + 4, awdlCoexSniffTable[k].dst)) {
                         pair = k;
                         break;
                     }
@@ -10032,10 +10032,10 @@ iwx_rx_frame(struct iwx_softc *sc, mbuf_t m, int chanidx,
         }
         // A Block Ack action frame to our AWDL address is ours whatever BSSID it carries.
         const bool baToUs = cf[0] == 0xd0 && mbuf_len(m) >= 26 && cf[24] == 3 && awdlCoexAddrKnown &&
-            ItlAWDL::sameAddress(cf + 4, awdlCoexAddr);
+            Aw::sameAddress(cf + 4, awdlCoexAddr);
         if (baToUs) {
             ++awdlCoexBaActionSeen[cf[25] < 3 ? cf[25] : 3];
-            awdlCoexBaEvent('B', cf[25], awdlCoexBaPeerAdded && ItlAWDL::sameAddress(cf + 10, awdlCoexBaPeer) ? 1 : 0,
+            awdlCoexBaEvent('B', cf[25], awdlCoexBaPeerAdded && Aw::sameAddress(cf + 10, awdlCoexBaPeer) ? 1 : 0,
                             awdlFrame ? 1 : 0,
                             (chanValid && unsigned(chanidx) == awdlCoexChannel ? 1U : 0U) |
                             (awdlCoexPeerKnown(cf + 10, awdlUptimeUS()) ? 2U : 0U));
@@ -10046,26 +10046,26 @@ iwx_rx_frame(struct iwx_softc *sc, mbuf_t m, int chanidx,
         if ((awdlFrame || baToUs) && cf[0] == 0xd0) {
             ++awdlCoexAwdlAction;
             ++(unsigned(chanidx) == awdlCoexChannel ? awdlCoexActionOnChannel : awdlCoexActionOffChannel);
-#if defined(ITL_AWDL_NATIVE)
+#if defined(AW_NATIVE)
             // The listener's frames come without the FCS; the hand-off expects four bytes after the
             // frame, as from monitor mode, so a copy gets them. Some setups also pad the frame with zeros
             // after its last TLV; that padding is cut, so the frame parses and is handed off as sent.
             size_t coexLen = mbuf_len(m);
             if (awdlCoexRx && !mbuf_next(m)) {
-                const size_t unpadded = ItlAWDL::trimZeroPadding(cf, coexLen);
+                const size_t unpadded = Aw::trimZeroPadding(cf, coexLen);
                 if (unpadded != coexLen) {
                     coexLen = unpadded;
                     ++awdlCoexZeroPadTrimmed;
                 }
             }
-            ItlAWDL::ActionFrame coexAction;
+            Aw::ActionFrame coexAction;
             if (awdlCoexRx && !mbuf_next(m) &&
-                ItlAWDL::parseAction(cf, coexLen, &coexAction) == ItlAWDL::ParseResult::Valid) {
+                Aw::parseAction(cf, coexLen, &coexAction) == Aw::ParseResult::Valid) {
                 const uint64_t heardUS = awdlUptimeUS();
                 const bool ourChannel = chanValid && unsigned(chanidx) == awdlCoexChannel;
-                const bool fromOwnAddr = awdlCoexAddrKnown && ItlAWDL::sameAddress(cf + 10, awdlCoexAddr);
+                const bool fromOwnAddr = awdlCoexAddrKnown && Aw::sameAddress(cf + 10, awdlCoexAddr);
                 if (!(cf[10] & 1) && !fromOwnAddr &&
-                    (!awdlCoexBaPeerAdded || ItlAWDL::sameAddress(cf + 10, awdlCoexBaPeer))) {
+                    (!awdlCoexBaPeerAdded || Aw::sameAddress(cf + 10, awdlCoexBaPeer))) {
                     uint8_t seq[16];
                     if (awdlCoexPeerSequence(cf, coexLen, seq)) {
                         ++awdlCoexPeerSeqFrames;
@@ -10082,7 +10082,7 @@ iwx_rx_frame(struct iwx_softc *sc, mbuf_t m, int chanidx,
                         // Probe: learn this sender's availability separately, whatever slot or role it has.
                         unsigned probe = kAwdlCoexProbePeers;
                         for (unsigned k = 0; k < awdlCoexProbeUsed; ++k)
-                            if (ItlAWDL::sameAddress(cf + 10, awdlCoexProbePeer[k])) {
+                            if (Aw::sameAddress(cf + 10, awdlCoexProbePeer[k])) {
                                 probe = k;
                                 break;
                             }
@@ -10094,9 +10094,9 @@ iwx_rx_frame(struct iwx_softc *sc, mbuf_t m, int chanidx,
                         }
                         if (probe < kAwdlCoexProbePeers) {
                             awdlCoexProbeSched[probe].ourChannel = uint8_t(awdlCoexChannel);
-                            ItlAWDL::PeerSyncInfo probeSync{};
+                            Aw::PeerSyncInfo probeSync{};
                             bool probeBad = false;
-                            if (ItlAWDL::peerSyncFromAction(cf, coexLen, &probeSync, &probeBad)) {
+                            if (Aw::peerSyncFromAction(cf, coexLen, &probeSync, &probeBad)) {
                                 awdlCoexProbeSched[probe].notePeerFrame(heardUS);
                                 awdlCoexProbeSched[probe].note(probeSync, heardUS, uint8_t(awdlCoexChannel));
                                 ++awdlCoexProbeNoted[probe];
@@ -10108,13 +10108,13 @@ iwx_rx_frame(struct iwx_softc *sc, mbuf_t m, int chanidx,
                     }
                     // The phone's schedule, from its sync frames, as dedicated mode tracks it: its BA peer
                     // once there is one, otherwise the first peer heard.
-                    if ((!awdlCoexBaPeerAdded || ItlAWDL::sameAddress(cf + 10, awdlCoexBaPeer)) &&
-                        (ItlAWDL::sameAddress(cf + 10, awdlCoexSchedPeer) || !awdlCoexScheduleCurrent() ||
+                    if ((!awdlCoexBaPeerAdded || Aw::sameAddress(cf + 10, awdlCoexBaPeer)) &&
+                        (Aw::sameAddress(cf + 10, awdlCoexSchedPeer) || !awdlCoexScheduleCurrent() ||
                          !awdlCoexPeerSchedule.fresh(heardUS))) {
-                        ItlAWDL::PeerSyncInfo peerSync{};
+                        Aw::PeerSyncInfo peerSync{};
                         bool badSequence = false;
-                        if (ItlAWDL::peerSyncFromAction(cf, coexLen, &peerSync, &badSequence)) {
-                            if (!awdlCoexScheduleCurrent() || !ItlAWDL::sameAddress(cf + 10, awdlCoexSchedPeer)) {
+                        if (Aw::peerSyncFromAction(cf, coexLen, &peerSync, &badSequence)) {
+                            if (!awdlCoexScheduleCurrent() || !Aw::sameAddress(cf + 10, awdlCoexSchedPeer)) {
                                 awdlCoexPeerSchedule.reset();
                                 awdlCoexSchedToken = awdlCoexToken;
                                 memcpy(awdlCoexSchedPeer, cf + 10, sizeof(awdlCoexSchedPeer));
@@ -10123,7 +10123,7 @@ iwx_rx_frame(struct iwx_softc *sc, mbuf_t m, int chanidx,
                             awdlCoexPeerSchedule.note(peerSync, heardUS, uint8_t(awdlCoexChannel));
                             ++awdlCoexPeerSyncFrames;
                             awdlCoexLastAnyFrameUS = heardUS;
-                        } else if (awdlCoexScheduleCurrent() && ItlAWDL::sameAddress(cf + 10, awdlCoexSchedPeer)) {
+                        } else if (awdlCoexScheduleCurrent() && Aw::sameAddress(cf + 10, awdlCoexSchedPeer)) {
                             if (badSequence) {
                                 ++awdlCoexPeerSequenceRejected;
                                 awdlCoexPeerSchedule.invalidate();
@@ -10144,7 +10144,7 @@ iwx_rx_frame(struct iwx_softc *sc, mbuf_t m, int chanidx,
                     unsigned added = 0;
                     mbuf_t merged = nullptr;
                     if (!mbuf_getpacket(MBUF_DONTWAIT, &merged) && merged && mbuf_maxlen(merged) > coexLen + 4) {
-                        const size_t room = MIN(size_t(mbuf_maxlen(merged)) - 4, ItlAWDL::kServiceMergeFrameMax);
+                        const size_t room = MIN(size_t(mbuf_maxlen(merged)) - 4, Aw::kServiceMergeFrameMax);
                         const size_t n = awdlServiceCache.merge(cf + 10, cf, coexLen,
                                                                 static_cast<uint8_t *>(mbuf_data(merged)), room, &added);
                         if (n) {
@@ -10184,7 +10184,7 @@ iwx_rx_frame(struct iwx_softc *sc, mbuf_t m, int chanidx,
             } else if (awdlCoexRx) {
                 ++awdlCoexForwardMalformed;
                 // Not AWDL's own format: a Block Ack request or teardown to our address, from a peer we hear.
-                ItlAWDL::AddbaRequest request;
+                Aw::AddbaRequest request;
                 bool delbaPeerWasSender = false;
                 uint8_t delbaTid = 0;
                 if (awdlCoexData && awdlCoexAddrKnown && !mbuf_next(m) && chanValid &&
@@ -10194,7 +10194,7 @@ iwx_rx_frame(struct iwx_softc *sc, mbuf_t m, int chanidx,
                     if (coexLen >= 26 && cf[0] == 0xd0 && cf[24] == 3) {
                         for (unsigned baSlot = 0; baSlot < kAwdlCoexBaMaxPeers; ++baSlot) {
                             auto &rs = awdlCoexBaSlots[baSlot];
-                            if (!rs.peerAdded || !ItlAWDL::sameAddress(cf + 10, rs.peer))
+                            if (!rs.peerAdded || !Aw::sameAddress(cf + 10, rs.peer))
                                 continue;
                             if (cf[25] == 0)
                                 ++rs.rxActReq;
@@ -10207,7 +10207,7 @@ iwx_rx_frame(struct iwx_softc *sc, mbuf_t m, int chanidx,
                             break;
                         }
                     }
-                    if (ItlAWDL::parseAddbaRequest(cf, coexLen, awdlCoexAddr, &request) && awdlFrame) {
+                    if (Aw::parseAddbaRequest(cf, coexLen, awdlCoexAddr, &request) && awdlFrame) {
                         ++awdlCoexBaRequests;
                         awdlCoexBaEvent('Q', request.token, request.tid, 0);
                         if (request.immediate) {
@@ -10216,7 +10216,7 @@ iwx_rx_frame(struct iwx_softc *sc, mbuf_t m, int chanidx,
                             unsigned target = kAwdlCoexBaMaxPeers;
                             for (unsigned baSlot = 0; baSlot < kAwdlCoexBaMaxPeers; ++baSlot) {
                                 if (awdlCoexBaSlots[baSlot].peerAdded &&
-                                    ItlAWDL::sameAddress(request.peer, awdlCoexBaSlots[baSlot].peer)) {
+                                    Aw::sameAddress(request.peer, awdlCoexBaSlots[baSlot].peer)) {
                                     target = baSlot;
                                     break;
                                 }
@@ -10236,13 +10236,13 @@ iwx_rx_frame(struct iwx_softc *sc, mbuf_t m, int chanidx,
                                 awdlCoexBaSlots[target].answerLength = 0;
                             }
                         }
-                    } else if (ItlAWDL::parseDelba(cf, coexLen, awdlCoexAddr, &delbaPeerWasSender, &delbaTid) &&
+                    } else if (Aw::parseDelba(cf, coexLen, awdlCoexAddr, &delbaPeerWasSender, &delbaTid) &&
                                delbaTid < 8) {
                         // Find the slot owning this DELBA's peer; every slot's sessions are checked.
                         unsigned target = kAwdlCoexBaMaxPeers;
                         for (unsigned baSlot = 0; baSlot < kAwdlCoexBaMaxPeers; ++baSlot)
                             if (awdlCoexBaSlots[baSlot].peerAdded &&
-                                ItlAWDL::sameAddress(cf + 10, awdlCoexBaSlots[baSlot].peer)) {
+                                Aw::sameAddress(cf + 10, awdlCoexBaSlots[baSlot].peer)) {
                                 target = baSlot;
                                 break;
                             }
@@ -10277,15 +10277,15 @@ iwx_rx_frame(struct iwx_softc *sc, mbuf_t m, int chanidx,
                             }
                         }
                     } else {
-                        ItlAWDL::AddbaAnswer answer;
-                        const bool parsed = ItlAWDL::parseAddbaAnswer(cf, coexLen, awdlCoexAddr, &answer);
+                        Aw::AddbaAnswer answer;
+                        const bool parsed = Aw::parseAddbaAnswer(cf, coexLen, awdlCoexAddr, &answer);
                         // Whichever slot is asking this peer with this dialog token gets the answer.
                         unsigned target = kAwdlCoexBaMaxPeers;
                         if (parsed)
                             for (unsigned baSlot = 0; baSlot < kAwdlCoexBaMaxPeers; ++baSlot) {
                                 auto &s = awdlCoexBaSlots[baSlot];
                                 if (s.txState == kCoexBaTxAsking && s.txAsks && s.peerAdded &&
-                                    ItlAWDL::sameAddress(cf + 10, s.peer) &&
+                                    Aw::sameAddress(cf + 10, s.peer) &&
                                     answer.token == s.txToken && answer.tid == kAwdlBaTxTid) {
                                     target = baSlot;
                                     break;
@@ -10327,7 +10327,7 @@ iwx_rx_frame(struct iwx_softc *sc, mbuf_t m, int chanidx,
         }
         else if (awdlFrame && (cf[0] & 0x0c) == 0x08) {
             ++awdlCoexAwdlData;
-#if defined(ITL_AWDL_NATIVE)
+#if defined(AW_NATIVE)
             // AWDL data heard by the listener, without the FCS. awdl0's hand-off expects the monitor-mode
             // layout, four bytes after the frame, so it gets a copy with them zeroed.
             const size_t dataLen = mbuf_len(m);
@@ -10342,7 +10342,7 @@ iwx_rx_frame(struct iwx_softc *sc, mbuf_t m, int chanidx,
                     ++awdlCoexRxVht80TwoStream;
                 if ((uint32_t(rate_n_flags) & IWX_RATE_MCS_MOD_TYPE_MSK) == IWX_RATE_MCS_HE_MSK) {
                     for (auto &rs : awdlCoexBaSlots)
-                        if (rs.peerAdded && ItlAWDL::sameAddress(cf + 10, rs.peer)) {
+                        if (rs.peerAdded && Aw::sameAddress(cf + 10, rs.peer)) {
                             rs.peerHeUS = awdlUptimeUS();
                             ++rs.peerHeFrames;
                         }
@@ -10350,23 +10350,23 @@ iwx_rx_frame(struct iwx_softc *sc, mbuf_t m, int chanidx,
             }
             if (awdlCoexData && !mbuf_next(m) && dataLen + 4 <= sizeof(awdlCoexDataBuf)) {
                 ++awdlCoexDataRx;
-                ItlAWDL::DataFrameView view;
+                Aw::DataFrameView view;
                 if (!chanValid || unsigned(chanidx) != awdlCoexChannel) {
                     ++awdlCoexDataRxOffChannel;
                 } else if (!awdlCoexPeerKnown(cf + 10, awdlUptimeUS())) {
                     ++awdlCoexDataRxUnknownPeer;
                     awdlCoexNoteRejectReason(cf + 10, awdlUptimeUS());
-                } else if (ItlAWDL::parseDataFrame(cf, dataLen, false, &view) == ItlAWDL::ParseResult::Valid) {
+                } else if (Aw::parseDataFrame(cf, dataLen, false, &view) == Aw::ParseResult::Valid) {
                     memcpy(awdlCoexDataBuf, cf, dataLen);
                     memset(awdlCoexDataBuf + dataLen, 0, 4);
-                    if (awdlCoexAddrKnown && ItlAWDL::sameAddress(view.destination, awdlCoexAddr))
+                    if (awdlCoexAddrKnown && Aw::sameAddress(view.destination, awdlCoexAddr))
                         (void)awdlCoexPeerKnown(cf + 10, awdlUptimeUS(), true);
                     for (unsigned baSlot = 0; baSlot < kAwdlCoexBaMaxPeers; ++baSlot) {
                         auto &s = awdlCoexBaSlots[baSlot];
-                        if (!s.peerAdded || !ItlAWDL::sameAddress(cf + 10, s.peer))
+                        if (!s.peerAdded || !Aw::sameAddress(cf + 10, s.peer))
                             continue;
                         s.peerLastUS = awdlUptimeUS();
-                        if (awdlCoexAddrKnown && ItlAWDL::sameAddress(view.destination, awdlCoexAddr))
+                        if (awdlCoexAddrKnown && Aw::sameAddress(view.destination, awdlCoexAddr))
                             (void)awdlCoexPeerKnown(cf + 10, s.peerLastUS, true);
                         if (!(cf[4] & 1) && dataLen >= 1200)
                             s.lastRxPayloadUS = s.peerLastUS;
@@ -10374,7 +10374,7 @@ iwx_rx_frame(struct iwx_softc *sc, mbuf_t m, int chanidx,
                             s.rxTidLastUS[cf[24] & 7] = s.peerLastUS;
                     }
                     itlAWDLObserveData(getController(), awdlCoexDataBuf, dataLen + 4);
-                    if (awdlCoexScheduleCurrent() && ItlAWDL::sameAddress(cf + 10, awdlCoexSchedPeer)) {
+                    if (awdlCoexScheduleCurrent() && Aw::sameAddress(cf + 10, awdlCoexSchedPeer)) {
                         awdlCoexSchedPeerRxUS = awdlUptimeUS();
                         awdlCoexPeerSchedule.notePeerFrame(awdlCoexSchedPeerRxUS);
                     }
@@ -10423,18 +10423,18 @@ iwx_rx_frame(struct iwx_softc *sc, mbuf_t m, int chanidx,
     if (awdlRx) {
         awdlRxObserve(sc, m, chanidx, rxi->rxi_rssi, device_timestamp);
         const uint8_t *frameBytes = mtod(m, const uint8_t *);
-        if (mbuf_len(m) >= 24 && (frameBytes[0] & 0x0c) == 8 && ItlAWDL::knownAddress(awdlOwnAddress) &&
-            ItlAWDL::sameAddress(frameBytes + 4, awdlOwnAddress))
+        if (mbuf_len(m) >= 24 && (frameBytes[0] & 0x0c) == 8 && Aw::knownAddress(awdlOwnAddress) &&
+            Aw::sameAddress(frameBytes + 4, awdlOwnAddress))
         {
             if (awdlTx80 && awdlWide80Live && chanidx == 149 &&
                 (rate_n_flags & IWX_RATE_MCS_MOD_TYPE_MSK) == IWX_RATE_MCS_VHT_MSK &&
                 (rate_n_flags & IWX_RATE_MCS_CHAN_WIDTH_MSK) == IWX_RATE_MCS_CHAN_WIDTH_80 &&
-                ItlAWDL::knownAddress(awdlLastPeer) && ItlAWDL::sameAddress(frameBytes + 10, awdlLastPeer)) {
+                Aw::knownAddress(awdlLastPeer) && Aw::sameAddress(frameBytes + 10, awdlLastPeer)) {
                 memcpy(awdlTx80Peer, frameBytes + 10, sizeof(awdlTx80Peer));
                 awdlTx80PeerUS = awdlUptimeUS();
                 awdlTx80PeerGeneration = sc->sc_generation;
             }
-            ItlAWDL::noteRxRate(awdlRxRates, nitems(awdlRxRates), uint32_t(rate_n_flags), awdlRxRatesOverflow);
+            Aw::noteRxRate(awdlRxRates, nitems(awdlRxRates), uint32_t(rate_n_flags), awdlRxRatesOverflow);
             if (awdlRxPhyInfo & IWX_RX_MPDU_PHY_AMPDU)
                 ++awdlBaRxAmpdu;
         }
@@ -11032,9 +11032,9 @@ iwx_rx_mpdu_mq(struct iwx_softc *sc, mbuf_t m, void *pktdata,
     }
     
     bool awdlPeerData = false;
-    if (awdlRx && mbuf_len(m) >= 24 && ItlAWDL::knownAddress(awdlOwnAddress)) {
+    if (awdlRx && mbuf_len(m) >= 24 && Aw::knownAddress(awdlOwnAddress)) {
         const uint8_t *f = mtod(m, const uint8_t *);
-        awdlPeerData = (f[0] & 0x0c) == 8 && !(f[0] & 0x40) && ItlAWDL::sameAddress(f + 4, awdlOwnAddress);
+        awdlPeerData = (f[0] & 0x0c) == 8 && !(f[0] & 0x40) && Aw::sameAddress(f + 4, awdlOwnAddress);
         if (awdlPeerData) {
             const bool qos = (f[0] & 0x80) && mbuf_len(m) >= 26;
             if (!qos)
@@ -11131,7 +11131,7 @@ iwx_rx_tx_cmd_single(struct iwx_softc *sc, struct iwx_rx_packet *pkt,
                            awdlRxAllFrames, awdlRxFromPeer);
         if (doneUS >= sent->submitUS) {
             const uint64_t flight = doneUS - sent->submitUS;
-            ++(sentOK ? awdlFlightOK : awdlFlightFail)[ItlAWDL::flightBin(flight)];
+            ++(sentOK ? awdlFlightOK : awdlFlightFail)[Aw::flightBin(flight)];
             awdlFlightSumUS += flight;
         }
         awdlLastDoneUS = doneUS;
@@ -11143,15 +11143,15 @@ iwx_rx_tx_cmd_single(struct iwx_softc *sc, struct iwx_rx_packet *pkt,
         if (resent) {
             if (sentOK) {
                 ++awdlResendRecovered;
-                awdlResend = ItlAWDL::ResendState{};
+                awdlResend = Aw::ResendState{};
             } else {
                 const bool wasHeld = awdlResend.held;
-                if (!ItlAWDL::resendAfterFailure(awdlResend, doneUS) && wasHeld)
+                if (!Aw::resendAfterFailure(awdlResend, doneUS) && wasHeld)
                     ++awdlResendGaveUp;
             }
         } else {
             ++(sentOK ? awdlDataOK : awdlDataFailed)[1];
-            ItlAWDL::noteDataResult(awdlDataRate, sentOK);
+            Aw::noteDataResult(awdlDataRate, sentOK);
         }
         awdlBurst.complete(sentOK);
         awdlKickTransmit = true;
@@ -11159,7 +11159,7 @@ iwx_rx_tx_cmd_single(struct iwx_softc *sc, struct iwx_rx_packet *pkt,
     if (awdlMonitorPending && awdlMonitorGeneration == sc->sc_generation &&
         tx_resp->tx_queue == awdlMonitorQueue) {
         awdlMonitorCompletedOK = status == IWX_TX_STATUS_SUCCESS;
-        ItlAWDL::recordAck(awdlAcks, int(awdlAckPending), unsigned(status), tx_resp->failure_frame);
+        Aw::recordAck(awdlAcks, int(awdlAckPending), unsigned(status), tx_resp->failure_frame);
         if (awdlDataInFlight) {
             const unsigned kind = awdlDataInFlight - 1;
             const bool sentOK = status == IWX_TX_STATUS_SUCCESS;
@@ -11173,29 +11173,29 @@ iwx_rx_tx_cmd_single(struct iwx_softc *sc, struct iwx_rx_packet *pkt,
                 const uint64_t doneUS = awdlUptimeUS();
                 if (doneUS >= awdlSubmitUS) {
                     const uint64_t flight = doneUS - awdlSubmitUS;
-                    ++(sentOK ? awdlFlightOK : awdlFlightFail)[ItlAWDL::flightBin(flight)];
+                    ++(sentOK ? awdlFlightOK : awdlFlightFail)[Aw::flightBin(flight)];
                     awdlFlightSumUS += flight;
                 }
                 awdlLastDoneUS = doneUS;
                 if (firstTry)
-                    ItlAWDL::noteDataResult(awdlDataRate, sentOK);
+                    Aw::noteDataResult(awdlDataRate, sentOK);
                 auto &results = awdlRateResults[awdlDataStepInFlight];
                 ++results[sentOK ? 1 : 2];
                 results[3] += tx_resp->failure_frame;
                 if (sentOK) {
                     if (!firstTry)
                         ++awdlResendRecovered;
-                    awdlResend = ItlAWDL::ResendState{};
+                    awdlResend = Aw::ResendState{};
                 } else {
                     const bool wasHeld = awdlResend.held;
-                    if (!ItlAWDL::resendAfterFailure(awdlResend, awdlUptimeUS()) && wasHeld)
+                    if (!Aw::resendAfterFailure(awdlResend, awdlUptimeUS()) && wasHeld)
                         ++awdlResendGaveUp;
                 }
             }
         }
         // Firmware can't credit ACKs to the foreign address, so it would skew this table.
-        if (ItlAWDL::ackProbeIsPeer(awdlAckPending) && awdlAckPending != ItlAWDL::AckProbe::PeerForeign)
-            ItlAWDL::recordPeerProbe(awdlPeerProbes, nitems(awdlPeerProbes), awdlPeerProbeCount, awdlAckTarget,
+        if (Aw::ackProbeIsPeer(awdlAckPending) && awdlAckPending != Aw::AckProbe::PeerForeign)
+            Aw::recordPeerProbe(awdlPeerProbes, nitems(awdlPeerProbes), awdlPeerProbeCount, awdlAckTarget,
                                      status == IWX_TX_STATUS_SUCCESS, awdlAckTargetRssi);
         if (awdlBaResponseInFlight) {
             awdlBaResponseInFlight = false;
@@ -11213,7 +11213,7 @@ iwx_rx_tx_cmd_single(struct iwx_softc *sc, struct iwx_rx_packet *pkt,
     
     if (txfail) {
         // Unanswered probes are expected and would flush the startup log.
-        if (awdlAckPending == ItlAWDL::AckProbe::None && !awdlDataInFlight && !burstFrame)
+        if (awdlAckPending == Aw::AckProbe::None && !awdlDataInFlight && !burstFrame)
             XYLog("%s %d OUTPUT_ERROR type=%d status=%d\n", __FUNCTION__, __LINE__, txd->type, status);
         // The second context's frames are AWDL's, not Wi-Fi's: they don't count against en0 or move
         // the station's management antenna.
@@ -11262,9 +11262,9 @@ iwx_txd_done(struct iwx_softc *sc, struct iwx_tx_data *txd)
         awdlMonitorPending = nullptr;
         awdlTxLog("single-frame buffer and node reclaimed on completion\n");
         // An unacknowledged probe is the measurement, not a transmit fault.
-        const bool ackProbeDone = awdlAckPending != ItlAWDL::AckProbe::None || awdlDataInFlight;
+        const bool ackProbeDone = awdlAckPending != Aw::AckProbe::None || awdlDataInFlight;
         const bool dataFinished = awdlDataInFlight != 0;
-        awdlAckPending = ItlAWDL::AckProbe::None;
+        awdlAckPending = Aw::AckProbe::None;
         awdlDataInFlight = 0;
         if (awdlSyncTrain && (awdlMonitorCompletedOK || ackProbeDone) && awdlMonitorSubmitted < awdlTrainLimit() &&
             awdlMonitorGeneration == sc->sc_generation) {
@@ -11497,7 +11497,7 @@ awdlAfterCompletion(struct iwx_softc *sc)
     if (!awdlKickTransmit)
         return;
     awdlKickTransmit = false;
-#if defined(ITL_AWDL_NATIVE)
+#if defined(AW_NATIVE)
     // A busy link would otherwise never let the timer hand finished packets back.
     (void)itlAWDLServiceTransmit(getController());
 #endif
@@ -11657,7 +11657,7 @@ iwx_rx_tx_cmd(struct iwx_softc *sc, struct iwx_rx_packet *pkt,
             // takes this status. A missing index identifies a candidate only when one descriptor was reclaimed.
             const int status = le16toh(tx_resp->status.status) & IWX_TX_STATUS_MSK;
             const bool ok = status == IWX_TX_STATUS_SUCCESS;
-            int statusSlot = ItlAWDL::reclaimStatusSlot(ring->tail, freed, n, pkt->hdr.idx);
+            int statusSlot = Aw::reclaimStatusSlot(ring->tail, freed, n, pkt->hdr.idx);
             const bool indexed = statusSlot >= 0;
             if (indexed) {
                 ++awdlCoexStatusIdxHits;
@@ -12488,13 +12488,13 @@ iwx_tx_fill_cmd(struct iwx_softc *sc, struct iwx_node *in,
     uint8_t hwrate;
 
     *flags = 0;
-    static const int awdlRateIndexes[ItlAWDL::kLegacyRateTop + 1] =
+    static const int awdlRateIndexes[Aw::kLegacyRateTop + 1] =
         {IWX_RATE_12M_INDEX, IWX_RATE_24M_INDEX, IWX_RATE_36M_INDEX, IWX_RATE_54M_INDEX};
     if ((ic->ic_opmode == IEEE80211_M_MONITOR && awdlDataInFlight == 3) || awdlCoexBaSendingAgg)
         return &iwx_rates[IWX_RATE_MCS_7_INDEX];
     const bool awdlUnicastData = ic->ic_opmode == IEEE80211_M_MONITOR && awdlDataInFlight == 2 &&
         type == IEEE80211_FC0_TYPE_DATA && !IEEE80211_IS_MULTICAST(wh->i_addr1);
-    int awdlMcs = ItlAWDL::htMcsForStep(awdlDataRate.step);
+    int awdlMcs = Aw::htMcsForStep(awdlDataRate.step);
     if (awdlUnicastData && awdlMcs >= 0) {
         // A fixed HT rate, 20 MHz, long guard interval. Two streams need both antennas.
         const uint8_t antennas = IWX_RATE_MCS_ANT_AB_MSK >> IWX_RATE_MCS_ANT_POS;
@@ -12512,7 +12512,7 @@ iwx_tx_fill_cmd(struct iwx_softc *sc, struct iwx_node *in,
         return awdlInfo;
     }
     // Stays on this step's rate only if the station's rate set has it, otherwise the next lower.
-    unsigned awdlStep = awdlMcs >= 0 ? ItlAWDL::kLegacyRateTop : awdlDataRate.step;
+    unsigned awdlStep = awdlMcs >= 0 ? Aw::kLegacyRateTop : awdlDataRate.step;
     while (awdlStep && !iwx_ridx2rate(rs, awdlRateIndexes[awdlStep]))
         --awdlStep;
     const int awdlDataRidx = awdlRateIndexes[awdlStep];
@@ -12642,14 +12642,14 @@ iwx_tx_update_byte_tbl(struct iwx_softc *sc, struct iwx_tx_ring *txq, int idx, u
 // An AWDL data frame macOS built for awdl0 (any destination), for the listener's queue.
 static bool awdlMonitorRequestValidCoex(mbuf_t m)
 {
-    ItlAWDL::DataFrameView data;
-    return ItlAWDL::parseDataFrame(mtod(m, const uint8_t *), mbuf_len(m), false, &data) == ItlAWDL::ParseResult::Valid;
+    Aw::DataFrameView data;
+    return Aw::parseDataFrame(mtod(m, const uint8_t *), mbuf_len(m), false, &data) == Aw::ParseResult::Valid;
 }
 
 static bool awdlMonitorRequestValid(mbuf_t m)
 {
-    ItlAWDL::DataFrameView data;
-    if (ItlAWDL::parseDataFrame(mtod(m, const uint8_t *), mbuf_len(m), false, &data) != ItlAWDL::ParseResult::Valid)
+    Aw::DataFrameView data;
+    if (Aw::parseDataFrame(mtod(m, const uint8_t *), mbuf_len(m), false, &data) != Aw::ParseResult::Valid)
         return false;
     return awdlDataTx || (awdlElicit && !(*data.destination & 1));
 }
@@ -12666,8 +12666,8 @@ void ItlIwx::awdlApplyMacAddress(struct iwx_softc *sc, const uint8_t *address)
     ++(result ? awdlMacApplyFailures : awdlMacApplies);
     awdlSessLog("firmware address set %s (%d)\n", result ? "failed" : "ok", result);
     awdlTxLog("MAC context address change result %d\n", result);
-    IORegistryEntry::getRegistryRoot()->setProperty("ITLAWDLMacContextResult", uint64_t(result ? 1 : 0), 32);
-    IORegistryEntry::getRegistryRoot()->setProperty("ITLAWDLMacContextGeneration", sc->sc_generation, 32);
+    IORegistryEntry::getRegistryRoot()->setProperty("AwMacContextResult", uint64_t(result ? 1 : 0), 32);
+    IORegistryEntry::getRegistryRoot()->setProperty("AwMacContextGeneration", sc->sc_generation, 32);
 }
 
 void ItlIwx::iwx_awdl_transport_probe(struct iwx_softc *sc)
@@ -12689,7 +12689,7 @@ void ItlIwx::iwx_awdl_transport_probe(struct iwx_softc *sc)
         (channel->ic_flags & (IEEE80211_CHAN_PASSIVE | IEEE80211_CHAN_DFS | IEEE80211_CHAN_NOADHOC)))
         return;
     const uint64_t syncNowUS = awdlUptimeUS();
-#if defined(ITL_AWDL_NATIVE)
+#if defined(AW_NATIVE)
     if (awdlBaResponseLength && !awdlBurst.count && !awdlResend.held) {
         mbuf_t answer = nullptr;
         if (!mbuf_getpacket(MBUF_DONTWAIT, &answer) && answer && mbuf_maxlen(answer) >= awdlBaResponseLength) {
@@ -12713,13 +12713,13 @@ void ItlIwx::iwx_awdl_transport_probe(struct iwx_softc *sc)
         if (answer)
             mbuf_freem(answer);
     }
-    if (awdlDataTx && !(awdlPeerTrain && awdlSyncProbe && ItlAWDL::syncBeforeData(awdlPeerAudible(), syncNowUS, awdlLastSyncUS))) {
+    if (awdlDataTx && !(awdlPeerTrain && awdlSyncProbe && Aw::syncBeforeData(awdlPeerAudible(), syncNowUS, awdlLastSyncUS))) {
         // With a window, failed frames are resent through the single-frame path below.
         if (awdlWindow > 1 && !awdlResend.held && awdlBurst.readyForRetry()) {
             size_t retryLength = 0;
             if (awdlBurst.takeRetry(awdlResendFrame, sizeof(awdlResendFrame), &retryLength)) {
                 awdlResendLength = retryLength;
-                awdlResend = ItlAWDL::ResendState{};
+                awdlResend = Aw::ResendState{};
                 awdlResend.held = true;
                 awdlResend.pending = true;
                 awdlResend.attempts = 1;
@@ -12729,8 +12729,8 @@ void ItlIwx::iwx_awdl_transport_probe(struct iwx_softc *sc)
         }
         // A held frame goes before anything newer, so the order stays the same.
         if (awdlResend.pending) {
-            if (ItlAWDL::resendExpired(awdlResend, syncNowUS)) {
-                awdlResend = ItlAWDL::ResendState{};
+            if (Aw::resendExpired(awdlResend, syncNowUS)) {
+                awdlResend = Aw::ResendState{};
                 ++awdlResendGaveUp;
             } else if (syncNowUS < awdlResend.notBeforeUS) {
                 return;
@@ -12739,7 +12739,7 @@ void ItlIwx::iwx_awdl_transport_probe(struct iwx_softc *sc)
                 if (mbuf_getpacket(MBUF_DONTWAIT, &again) || !again || mbuf_maxlen(again) < awdlResendLength) {
                     if (again)
                         mbuf_freem(again);
-                    awdlResend = ItlAWDL::ResendState{};
+                    awdlResend = Aw::ResendState{};
                     ++awdlResendGaveUp;
                     return;
                 }
@@ -12757,13 +12757,13 @@ void ItlIwx::iwx_awdl_transport_probe(struct iwx_softc *sc)
                     if (!awdlBurst.push(static_cast<const uint8_t *>(mbuf_data(again)), awdlResendLength,
                                         syncNowUS, uint8_t(awdlDataRate.step), true)) {
                         mbuf_freem(again);
-                        awdlResend = ItlAWDL::ResendState{};
+                        awdlResend = Aw::ResendState{};
                         ++awdlResendGaveUp;
                         return;
                     }
                     if (iwx_tx_monitor_burst(sc, again, ic->ic_bss)) {
                         awdlBurst.dropNewest();
-                        awdlResend = ItlAWDL::ResendState{};
+                        awdlResend = Aw::ResendState{};
                         ++awdlResendGaveUp;
                     }
                     return;
@@ -12778,7 +12778,7 @@ void ItlIwx::iwx_awdl_transport_probe(struct iwx_softc *sc)
                     awdlMonitorProbeStarted = false;
                     awdlMonitorTxAttempted = false;
                     awdlDataInFlight = 0;
-                    awdlResend = ItlAWDL::ResendState{};
+                    awdlResend = Aw::ResendState{};
                     ++awdlResendGaveUp;
                 }
                 return;
@@ -12806,7 +12806,7 @@ void ItlIwx::iwx_awdl_transport_probe(struct iwx_softc *sc)
                         memcpy(mbuf_data(copy), repeat->bytes, repeat->length);
                         mbuf_setlen(copy, repeat->length);
                         mbuf_pkthdr_setlen(copy, repeat->length);
-                        ItlAWDL::MulticastRepeats::sent(*repeat, syncNowUS);
+                        Aw::MulticastRepeats::sent(*repeat, syncNowUS);
                         ++awdlMulticastRepeatsSent;
                         --awdlDataSent[0]; // sendMulticast counts it, and this is a repeat.
                         sendMulticast(copy, true);
@@ -12814,7 +12814,7 @@ void ItlIwx::iwx_awdl_transport_probe(struct iwx_softc *sc)
                     }
                     if (copy)
                         mbuf_freem(copy);
-                    ItlAWDL::MulticastRepeats::sent(*repeat, syncNowUS);
+                    Aw::MulticastRepeats::sent(*repeat, syncNowUS);
                 }
             }
             if (awdlDeferredMulticast && !awdlBurst.count) {
@@ -12836,7 +12836,7 @@ void ItlIwx::iwx_awdl_transport_probe(struct iwx_softc *sc)
                     break;
                 }
                 if (static_cast<const uint8_t *>(mbuf_data(next))[4] & 1) {
-                    if (awdlMcastUnicast && ItlAWDL::knownAddress(awdlLastPeer) && !mbuf_next(next) &&
+                    if (awdlMcastUnicast && Aw::knownAddress(awdlLastPeer) && !mbuf_next(next) &&
                         syncNowUS - awdlPeerLastHeardUS < kAwdlMcastPeerRecentUS) {
                         mbuf_t copy = nullptr;
                         if (!mbuf_getpacket(MBUF_DONTWAIT, &copy) && copy && mbuf_maxlen(copy) >= mbuf_len(next)) {
@@ -12920,7 +12920,7 @@ void ItlIwx::iwx_awdl_transport_probe(struct iwx_softc *sc)
                 awdlDataEverActive = true;
                 awdlLastDataUS = syncNowUS;
                 // iwx_tx changes the packet, so the copy has to come first.
-                awdlResend = ItlAWDL::ResendState{};
+                awdlResend = Aw::ResendState{};
                 const size_t dataLength = mbuf_len(dataPacket);
                 if (!mbuf_next(dataPacket) && dataLength <= sizeof(awdlResendFrame)) {
                     memcpy(awdlResendFrame, mbuf_data(dataPacket), dataLength);
@@ -12946,17 +12946,17 @@ void ItlIwx::iwx_awdl_transport_probe(struct iwx_softc *sc)
 #endif
     if (awdlPeerTrain && !awdlPeerAudible())
         return;
-#if defined(ITL_AWDL_NATIVE)
+#if defined(AW_NATIVE)
     // The timer runs every millisecond around a transfer, so sync frames need their own pace.
     if (awdlDataTx && awdlPeerTrain) {
         // Only while no data has moved for a second: these frames take the single-frame path, and
         // on iface106 they held back connection setup and the start of sends.
-        const bool awTimed = awdlAwSync && !ItlAWDL::dataRecentlyActive(awdlDataEverActive, syncNowUS, awdlLastDataUS) &&
+        const bool awTimed = awdlAwSync && !Aw::dataRecentlyActive(awdlDataEverActive, syncNowUS, awdlLastDataUS) &&
             syncNowUS - awdlLastSyncUS >= kAwdlAwSyncMinGapUS &&
             awdlPeerSchedule.inPresentAwStart(syncNowUS, kAwdlAwSyncWindowUS);
         if (awTimed)
             ++awdlAwSyncFrames;
-        else if (!ItlAWDL::syncIdleDue(syncNowUS, awdlLastSyncUS))
+        else if (!Aw::syncIdleDue(syncNowUS, awdlLastSyncUS))
             return;
     }
 #endif
@@ -12966,7 +12966,7 @@ void ItlIwx::iwx_awdl_transport_probe(struct iwx_softc *sc)
     uint64_t uptime, ns;
     clock_get_uptime(&uptime);
     absolutetime_to_nanoseconds(uptime, &ns);
-#if defined(ITL_AWDL_NATIVE)
+#if defined(AW_NATIVE)
     if (awdlSyncProbe) {
         mbuf_t syncPacket = nullptr;
         const auto result = itlAWDLBuildSyncProbe(getController(), &syncPacket, ns / 1000);
@@ -12984,12 +12984,12 @@ void ItlIwx::iwx_awdl_transport_probe(struct iwx_softc *sc)
         if (result == kIOReturnSuccess && syncPacket) {
             const auto *built = static_cast<const uint8_t *>(mbuf_data(syncPacket));
             if (mbuf_len(syncPacket) >= 24) {
-                if (ItlAWDL::knownAddress(awdlOwnAddress) && memcmp(awdlOwnAddress, built + 10, sizeof(awdlOwnAddress))) {
+                if (Aw::knownAddress(awdlOwnAddress) && memcmp(awdlOwnAddress, built + 10, sizeof(awdlOwnAddress))) {
                     ++awdlMacAddressChanges;
                     awdlSessLog("our AWDL address changed\n");
                 }
                 memcpy(awdlOwnAddress, built + 10, sizeof(awdlOwnAddress));
-                awdlKeepSample("ITLAWDLSampleTX", built, mbuf_len(syncPacket));
+                awdlKeepSample("AwSampleTX", built, mbuf_len(syncPacket));
                 awdlNoteServices(built, mbuf_len(syncPacket), false);
                 // First time, after a failure (the override is cleared), or after the address changed.
                 const bool macStale = memcmp(awdlMacOverride, awdlOwnAddress, sizeof(awdlMacOverride)) != 0;
@@ -12999,41 +12999,41 @@ void ItlIwx::iwx_awdl_transport_probe(struct iwx_softc *sc)
                     awdlApplyMacAddress(sc, awdlOwnAddress);
                 }
                 const auto probe = awdlAckProbe ?
-                    ItlAWDL::ackProbeFor(awdlMonitorSubmitted, ItlAWDL::knownAddress(awdlLastPeer), awdlElicit, awdlForeignControl) : ItlAWDL::AckProbe::None;
-                if (probe != ItlAWDL::AckProbe::None) {
+                    Aw::ackProbeFor(awdlMonitorSubmitted, Aw::knownAddress(awdlLastPeer), awdlElicit, awdlForeignControl) : Aw::AckProbe::None;
+                if (probe != Aw::AckProbe::None) {
                     // Locally administered and unused, so nothing should ACK it.
                     static const uint8_t control[6] = {0x02, 0x11, 0x22, 0x33, 0x44, 0x55};
                     auto *editable = static_cast<uint8_t *>(mbuf_data(syncPacket));
-                    memcpy(editable + 4, ItlAWDL::ackProbeIsPeer(probe) ? awdlLastPeer : control, 6);
+                    memcpy(editable + 4, Aw::ackProbeIsPeer(probe) ? awdlLastPeer : control, 6);
                     memcpy(awdlAckTarget, editable + 4, 6);
                     awdlAckTargetRssi = awdlLastPeerRssi;
-                    if (ItlAWDL::ackProbeUsesHardwareSource(probe))
+                    if (Aw::ackProbeUsesHardwareSource(probe))
                         memcpy(editable + 10, ic->ic_myaddr, 6);
                     awdlAckPending = probe;
-                    if (probe == ItlAWDL::AckProbe::PeerNeighbor || probe == ItlAWDL::AckProbe::PeerEcho ||
-                        probe == ItlAWDL::AckProbe::PeerForeign) {
+                    if (probe == Aw::AckProbe::PeerNeighbor || probe == Aw::AckProbe::PeerEcho ||
+                        probe == Aw::AckProbe::PeerForeign) {
                         uint8_t peerIP[16];
-                        const bool learned = ItlAWDL::sameAddress(awdlLearnedPeer, awdlLastPeer);
+                        const bool learned = Aw::sameAddress(awdlLearnedPeer, awdlLastPeer);
                         if (learned)
                             memcpy(peerIP, awdlLearnedPeerIP, sizeof(peerIP));
                         else
-                            ItlAWDL::linkLocalFromAddress(awdlLastPeer, peerIP);
+                            Aw::linkLocalFromAddress(awdlLastPeer, peerIP);
                         size_t written = 0;
-                        const auto request = probe == ItlAWDL::AckProbe::PeerEcho ?
-                            ItlAWDL::PeerRequest::Echo : ItlAWDL::PeerRequest::Neighbor;
-                        const uint8_t *requestSource = probe == ItlAWDL::AckProbe::PeerForeign ?
-                            ItlAWDL::foreignAddress() : awdlOwnAddress;
-                        if (ItlAWDL::buildPeerRequest(request, requestSource, awdlLastPeer, peerIP,
+                        const auto request = probe == Aw::AckProbe::PeerEcho ?
+                            Aw::PeerRequest::Echo : Aw::PeerRequest::Neighbor;
+                        const uint8_t *requestSource = probe == Aw::AckProbe::PeerForeign ?
+                            Aw::foreignAddress() : awdlOwnAddress;
+                        if (Aw::buildPeerRequest(request, requestSource, awdlLastPeer, peerIP,
                                 awdlRequestSequence++, editable, mbuf_maxlen(syncPacket), &written) ==
-                            ItlAWDL::BuildResult::Ready) {
+                            Aw::BuildResult::Ready) {
                             mbuf_setlen(syncPacket, written);
                             mbuf_pkthdr_setlen(syncPacket, written);
-                            awdlKeepSample(probe == ItlAWDL::AckProbe::PeerNeighbor ? "ITLAWDLSampleNeighbor" : "ITLAWDLSampleEcho",
+                            awdlKeepSample(probe == Aw::AckProbe::PeerNeighbor ? "AwSampleNeighbor" : "AwSampleEcho",
                                            editable, written);
                         } else {
                             // Still a valid sync frame; just don't count it as a request.
                             memset(editable + 4, 0xff, 6);
-                            awdlAckPending = ItlAWDL::AckProbe::None;
+                            awdlAckPending = Aw::AckProbe::None;
                         }
                     }
                 }
@@ -13046,8 +13046,8 @@ void ItlIwx::iwx_awdl_transport_probe(struct iwx_softc *sc)
 #endif
     uint8_t bytes[40];
     size_t length = 0;
-    if (ItlAWDL::buildTransportProbe(ic->ic_myaddr, uint32_t(ns / 1000), bytes,
-            sizeof(bytes), &length) != ItlAWDL::BuildResult::Ready) {
+    if (Aw::buildTransportProbe(ic->ic_myaddr, uint32_t(ns / 1000), bytes,
+            sizeof(bytes), &length) != Aw::BuildResult::Ready) {
         awdlTxLog("single-frame transport probe construction failed\n");
         return;
     }
@@ -13157,23 +13157,23 @@ iwx_tx(struct iwx_softc *sc, mbuf_t m, struct ieee80211_node *ni, int ac, int mo
         // The second context's frames: only valid AWDL action frames, in the gate, while it exists.
         // Its context, station and queue live in the firmware independently of the station link, so the
         // sync frames still go out while unassociated; there S_RUN is not a precondition.
-        ItlAWDL::ActionFrame decoded;
+        Aw::ActionFrame decoded;
         if (!awdlCoexSending || !awdlCoexTxStaAdded || !awdlCoexAdded || awdlCoexGeneration != sc->sc_generation ||
             !getMainWorkLoop()->inGate() || sc->sc_ic.ic_opmode != IEEE80211_M_STA ||
             (!(awdlCoexMulti && awdlCoexMultiActive) && sc->sc_ic.ic_state != IEEE80211_S_RUN) ||
             mbuf_next(m) || mbuf_len(m) != mbuf_pkthdr_len(m) ||
             mbuf_len(m) > 2304 ||
             (awdlCoexSendingData ? !awdlCoexData || (!awdlMonitorRequestValidCoex(m) &&
-                                                      !ItlAWDL::isAddbaFrame(mtod(m, const uint8_t *), mbuf_len(m)) &&
-                                                      !ItlAWDL::isDelbaFrame(mtod(m, const uint8_t *), mbuf_len(m))) :
-             ItlAWDL::parseAction(mtod(m, const uint8_t *), mbuf_len(m), &decoded) != ItlAWDL::ParseResult::Valid)) {
+                                                      !Aw::isAddbaFrame(mtod(m, const uint8_t *), mbuf_len(m)) &&
+                                                      !Aw::isDelbaFrame(mtod(m, const uint8_t *), mbuf_len(m))) :
+             Aw::parseAction(mtod(m, const uint8_t *), mbuf_len(m), &decoded) != Aw::ParseResult::Valid)) {
             mbuf_freem(m);
             return EACCES;
         }
     } else if (awdlRx || monitorQueue >= 0) {
         auto *ic = &sc->sc_ic;
         auto *channel = sc->sc_phyctxt[0].channel;
-        ItlAWDL::ActionFrame decoded;
+        Aw::ActionFrame decoded;
         if (!awdlRx || !awdlMonitorTxArmed || !getMainWorkLoop()->inGate() ||
             monitorQueue < 0 || (monitorQueue != awdlMonitorQueue && monitorQueue != awdlBaTxQueue) ||
             awdlMonitorGeneration != sc->sc_generation || (awdlMonitorPending && monitorQueue != awdlBaTxQueue) ||
@@ -13184,9 +13184,9 @@ iwx_tx(struct iwx_softc *sc, mbuf_t m, struct ieee80211_node *ni, int ac, int mo
             (channel->ic_flags & (IEEE80211_CHAN_PASSIVE | IEEE80211_CHAN_DFS | IEEE80211_CHAN_NOADHOC)) ||
             !isset(ic->ic_chan_active, ieee80211_chan2ieee(ic, channel)) ||
             mbuf_next(m) || mbuf_len(m) != mbuf_pkthdr_len(m) ||
-            mbuf_len(m) > 2048 || (ItlAWDL::parseAction(mtod(m, const uint8_t *),
-                mbuf_len(m), &decoded) != ItlAWDL::ParseResult::Valid && !awdlMonitorRequestValid(m) &&
-                !(awdlBaResponseInFlight && ItlAWDL::isAddbaFrame(mtod(m, const uint8_t *), mbuf_len(m))))) {
+            mbuf_len(m) > 2048 || (Aw::parseAction(mtod(m, const uint8_t *),
+                mbuf_len(m), &decoded) != Aw::ParseResult::Valid && !awdlMonitorRequestValid(m) &&
+                !(awdlBaResponseInFlight && Aw::isAddbaFrame(mtod(m, const uint8_t *), mbuf_len(m))))) {
             mbuf_freem(m);
             return EACCES;
         }
@@ -13324,7 +13324,7 @@ iwx_tx(struct iwx_softc *sc, mbuf_t m, struct ieee80211_node *ni, int ac, int mo
         awdlFixedChannel == 149 && awdlTx80ConsecutiveMisses < 8 &&
         awdlTx80PeerUS && awdlTx80PeerGeneration == sc->sc_generation &&
         type == IEEE80211_FC0_TYPE_DATA && !(wh->i_fc[1] & IEEE80211_FC1_RETRY) &&
-        mbuf_pkthdr_len(m) >= 1200 && ItlAWDL::sameAddress(wh->i_addr1, awdlTx80Peer) &&
+        mbuf_pkthdr_len(m) >= 1200 && Aw::sameAddress(wh->i_addr1, awdlTx80Peer) &&
         awdlUptimeUS() - awdlTx80PeerUS < 10000000) {
         const uint8_t cmdVersion = iwx_lookup_cmd_ver(sc, IWX_LONG_GROUP, IWX_TX_CMD);
         const uint8_t antennas = IWX_RATE_MCS_ANT_AB_MSK >> IWX_RATE_MCS_ANT_POS;
@@ -13986,7 +13986,7 @@ iwx_rm_sta(struct iwx_softc *sc, struct iwx_node *in)
         awdlBaResponseLength = 0;
         awdlBaPeerAccepted = false;
         awdlBaFilterOff = false;
-        awdlBaFilter = ItlAWDL::BaFilterState{};
+        awdlBaFilter = Aw::BaFilterState{};
         awdlBaTxState = kBaTxOff;
         awdlBaTxQueue = -1;
         awdlBaTxLastAskUS = 0;
@@ -14864,21 +14864,21 @@ iwx_mcc_update(struct iwx_softc *sc, struct iwx_mcc_chub_notif *notif)
         const uint16_t reported = le16toh(notif->mcc);
         ++awdlCountryNotices;
         if (awdlCountryDiscovery) {
-            if (ItlAWDL::countryNoticeUsable(reported, notif->source_id) && !awdlCountryNoticeSeen) {
+            if (Aw::countryNoticeUsable(reported, notif->source_id) && !awdlCountryNoticeSeen) {
                 awdlCountryNotice = reported;
                 awdlCountryNoticeSource = notif->source_id;
                 awdlCountryNoticeSeen = true;
                 getMainCommandGate()->commandWakeup(&awdlCountryDiscovery);
             }
-        } else if (awdlFixedChannel == 149 && notif->source_id == ItlAWDL::kMccSourceWifi &&
+        } else if (awdlFixedChannel == 149 && notif->source_id == Aw::kMccSourceWifi &&
                    reported != awdlCountryLastAnswered &&
-                   ItlAWDL::mccEchoDue(awdlCountryAnswers != 0, mccUptimeSeconds(), awdlCountryAnswerSeconds)) {
+                   Aw::mccEchoDue(awdlCountryAnswers != 0, mccUptimeSeconds(), awdlCountryAnswerSeconds)) {
             // The domain can be taken back, and that has to reach the channel map too.
             awdlCountryNotice = reported;
             awdlCountryNoticeSource = notif->source_id;
             awdlCountryAnswerPending = true;
         } else if (awdlBackgroundScan && awdlFixedChannel != 149 && !awdlCountryDiscovery &&
-                   ItlAWDL::countryNoticeUsable(reported, notif->source_id)) {
+                   Aw::countryNoticeUsable(reported, notif->source_id)) {
             awdlChannelMove.upNoticed = true;
         }
     }
@@ -14912,13 +14912,13 @@ iwx_mcc_update(struct iwx_softc *sc, struct iwx_mcc_chub_notif *notif)
         }
     }
     if (mccProbe) {
-        ItlAWDL::regulatoryAppend(mccNotices, nitems(mccNotices), mccNoticeCount,
-            ItlAWDL::MccNotice{mccUptimeSeconds(), le16toh(notif->mcc), notif->source_id, 0});
+        Aw::regulatoryAppend(mccNotices, nitems(mccNotices), mccNoticeCount,
+            Aw::MccNotice{mccUptimeSeconds(), le16toh(notif->mcc), notif->source_id, 0});
         ++mccNoticeTotal;
         mccNoticeLastSeconds = mccUptimeSeconds();
         mccProbePublish();
         // Answering needs a reply from the firmware, so it can't happen in this handler.
-        if (ItlAWDL::mccEchoDue(mccEchoAnswered, mccNoticeLastSeconds, mccEchoLastSeconds)) {
+        if (Aw::mccEchoDue(mccEchoAnswered, mccNoticeLastSeconds, mccEchoLastSeconds)) {
             mccEchoCountry = le16toh(notif->mcc);
             mccEchoSource = notif->source_id;
             mccProbeNoticePending = true;
@@ -15116,10 +15116,10 @@ iwx_mac_ctxt_cmd_common(struct iwx_softc *sc, struct iwx_node *in,
     cmd->tsf_id = htole32(IWX_TSF_ID_A);
     
     IEEE80211_ADDR_COPY(cmd->node_addr, ic->ic_opmode == IEEE80211_M_MONITOR &&
-                        ItlAWDL::knownAddress(awdlMacOverride) ? awdlMacOverride : ic->ic_myaddr);
+                        Aw::knownAddress(awdlMacOverride) ? awdlMacOverride : ic->ic_myaddr);
     if (ic->ic_opmode == IEEE80211_M_MONITOR) {
         IEEE80211_ADDR_COPY(cmd->bssid_addr, awdlBaMacType ? kAwdlBssid :
-                            awdlBaProbe && ItlAWDL::knownAddress(awdlBaBssid) ? awdlBaBssid : etherbroadcastaddr);
+                            awdlBaProbe && Aw::knownAddress(awdlBaBssid) ? awdlBaBssid : etherbroadcastaddr);
         if (awdlBaProbe) {
             // Block Acks are HT control responses, so the firmware may need to know that HT is
             // on and which rates to answer at. Nothing else about this context changes.
@@ -16290,7 +16290,7 @@ iwx_auth(struct iwx_softc *sc)
         // This firmware assigns its own queue number, which iwx_enable_txq
         // treats as fatal, restarting the driver. The receive test sends nothing.
         if (awdlRx) {
-            if (awdlQueueProbe && ItlAWDL::monitorQueueShouldAllocate(awdlQueueProbeAttempted,
+            if (awdlQueueProbe && Aw::monitorQueueShouldAllocate(awdlQueueProbeAttempted,
                     awdlMonitorQueue, awdlMonitorGeneration, sc->sc_generation)) {
                 // A failed setup can trigger firmware reinitialization, so a failure
                 // is never retried. A success is repeated once per firmware start,
@@ -16303,12 +16303,12 @@ iwx_auth(struct iwx_softc *sc)
                 awdlBurst.reset();
                 awdlMulticastRepeats.reset();
                 awdlBackgroundScanActive = false;
-                awdlResend = ItlAWDL::ResendState{};
+                awdlResend = Aw::ResendState{};
                 if (awdlDeferredMulticast) {
                     mbuf_freem(awdlDeferredMulticast);
                     awdlDeferredMulticast = nullptr;
                 }
-                awdlAckPending = ItlAWDL::AckProbe::None;
+                awdlAckPending = Aw::AckProbe::None;
                 awdlMacTried = false;
                 // Allocate through the existing firmware-selected queue path.
                 // Do not set first_data_qid or submit/doorbell any frame.
@@ -16698,7 +16698,7 @@ awdlCoexCountryAnswer(struct iwx_softc *sc)
     const uint16_t mcc = awdlCoexCountryNotice;
     const uint8_t source = awdlCoexCountrySource;
     const int gen = sc->sc_generation;
-    ItlAWDL::MccSample reply{};
+    Aw::MccSample reply{};
     const int err = iwx_mcc_request(sc, mcc, source, &reply, true);
     if (gen != sc->sc_generation)
         return;
@@ -16716,7 +16716,7 @@ awdlCoexCountryAnswer(struct iwx_softc *sc)
     // Beacon hints belong to the old country's rules; Linux drops them on a regulatory change too. A
     // detour through the firmware's world code isn't a change of country: the hints stay until a
     // different usable country is answered. The firmware's own channel flags still apply on every use.
-    const bool usableCountry = ItlAWDL::countryNoticeUsable(mcc, source);
+    const bool usableCountry = Aw::countryNoticeUsable(mcc, source);
     if (!usableCountry)
         ++awdlCoexCountryUnusableAnswers;
     else if (mcc != awdlCoexHintCountry) {
@@ -16750,7 +16750,7 @@ awdlCoexCountryAnswer(struct iwx_softc *sc)
     awdlCoexCountryAnswerSeconds = mccUptimeSeconds();
     awdlCoexCountryRetryUS = 0;
     ++awdlCoexCountryAnswers;
-    awdlCoexCountryLearned = ItlAWDL::countryNoticeUsable(mcc, source);
+    awdlCoexCountryLearned = Aw::countryNoticeUsable(mcc, source);
     // A newer notice that arrived while this one waited on the firmware is still pending, and goes next.
     if (awdlCoexCountryNotice == mcc && awdlCoexCountrySource == source)
         awdlCoexCountryPending = false;
@@ -16945,7 +16945,7 @@ awdlCoexListener(struct iwx_softc *sc, bool add)
             s.rxIdleTids = 0;
         }
         awdlCoexBaFilterOff = false;
-        awdlCoexBaFilter = ItlAWDL::BaFilterState{};
+        awdlCoexBaFilter = Aw::BaFilterState{};
         awdlCoexQueue = -1;
         awdlCoexTxSetupTried = 0;
         awdlCoexTxSetupNextUS = 0;
@@ -17448,7 +17448,7 @@ awdlCoexTxTeardown(struct iwx_softc *sc)
 void ItlIwx::
 awdlCoexTxSend(struct iwx_softc *sc)
 {
-#if defined(ITL_AWDL_NATIVE)
+#if defined(AW_NATIVE)
     struct ieee80211com *ic = &sc->sc_ic;
     struct iwx_node *in = (struct iwx_node *)ic->ic_bss;
     // The listener runs in its own PHY context, with its own firmware station and queue. When the station
@@ -18122,7 +18122,7 @@ iwx_send_bt_init_conf(struct iwx_softc *sc)
     
     // Monitor mode keeps Wi-Fi busy on 2.4 GHz, so an AWDL test boot may need a different
     // balance with Bluetooth, which shares the radio. Default behaviour is unchanged.
-    bt_cmd.mode = htole32(ItlAWDL::btCoexModeFor(awdlBtCoexRequest, IWX_BT_COEX_WIFI));
+    bt_cmd.mode = htole32(Aw::btCoexModeFor(awdlBtCoexRequest, IWX_BT_COEX_WIFI));
     bt_cmd.enabled_modules = 0;
     
     return iwx_send_cmd_pdu(sc, IWX_BT_CONFIG, 0, sizeof(bt_cmd),
@@ -18169,7 +18169,7 @@ iwx_send_soc_conf(struct iwx_softc *sc)
 }
 
 int ItlIwx::
-iwx_mcc_request(struct iwx_softc *sc, uint16_t country, uint8_t source, ItlAWDL::MccSample *sample, bool apply)
+iwx_mcc_request(struct iwx_softc *sc, uint16_t country, uint8_t source, Aw::MccSample *sample, bool apply)
 {
     // The reply is recorded. The channel map changes only with apply, and then as the firmware says.
     struct iwx_mcc_update_cmd mcc_cmd;
@@ -18209,9 +18209,9 @@ iwx_mcc_request(struct iwx_softc *sc, uint16_t country, uint8_t source, ItlAWDL:
         sample->status = uint8_t(le32toh(resp->status));
         const uint8_t *table = sc->sc_uhb_supported ? iwx_nvm_channels_uhb : iwx_nvm_channels_8000;
         const size_t tableCount = sc->sc_uhb_supported ? nitems(iwx_nvm_channels_uhb) : nitems(iwx_nvm_channels_8000);
-        ItlAWDL::regulatoryChannelFlags(table, tableCount, 149, resp->channels, resp->n_channels, &sample->channel149);
-        ItlAWDL::regulatoryChannelFlags(table, tableCount, 36, resp->channels, resp->n_channels, &sample->channel36);
-        ItlAWDL::regulatoryChannelFlags(table, tableCount, 6, resp->channels, resp->n_channels, &sample->channel6);
+        Aw::regulatoryChannelFlags(table, tableCount, 149, resp->channels, resp->n_channels, &sample->channel149);
+        Aw::regulatoryChannelFlags(table, tableCount, 36, resp->channels, resp->n_channels, &sample->channel36);
+        Aw::regulatoryChannelFlags(table, tableCount, 6, resp->channels, resp->n_channels, &sample->channel6);
         if (apply)
             iwx_init_channel_map(sc, NULL, resp->channels, resp->n_channels);
     }
@@ -18224,7 +18224,7 @@ out:
 bool ItlIwx::
 awdlCountryAnswer(struct iwx_softc *sc)
 {
-    ItlAWDL::MccSample reply{};
+    Aw::MccSample reply{};
     awdlCountryLastAnswered = awdlCountryNotice;
     awdlCountryAnswerSeconds = mccUptimeSeconds();
     ++awdlCountryAnswers;
@@ -18261,7 +18261,7 @@ awdlBaHandle(struct iwx_softc *sc)
         awdlBaResponseLength = 0;
         awdlBaPeerAccepted = false;
         awdlBaFilterOff = false;
-        awdlBaFilter = ItlAWDL::BaFilterState{};
+        awdlBaFilter = Aw::BaFilterState{};
         awdlBaTxState = kBaTxOff;
         awdlBaTxQueue = -1;
         awdlBaTxLastAskUS = 0;
@@ -18269,7 +18269,7 @@ awdlBaHandle(struct iwx_softc *sc)
         awdlBaTxRestUntilUS = 0;
         ++awdlBaTxToken;
     }
-    const ItlAWDL::AddbaRequest request = awdlBaRequest;
+    const Aw::AddbaRequest request = awdlBaRequest;
     if (!request.immediate || !sc->sc_ic.ic_bss)
         return;
     auto *in = reinterpret_cast<struct iwx_node *>(sc->sc_ic.ic_bss);
@@ -18306,7 +18306,7 @@ awdlBaHandle(struct iwx_softc *sc)
         }
         awdlBaStationAdded = true;
         // Filters stay promiscuous, so frames for other BSSIDs and groups still arrive.
-        if (ItlAWDL::knownAddress(request.bssid)) {
+        if (Aw::knownAddress(request.bssid)) {
             awdlBaStep = 4;
             memcpy(awdlBaBssid, request.bssid, sizeof(awdlBaBssid));
             err = iwx_mac_ctxt_cmd(sc, in, IWX_FW_CTXT_ACTION_MODIFY, 0);
@@ -18360,7 +18360,7 @@ awdlBaHandle(struct iwx_softc *sc)
     }
     // The peer repeats its request until it hears an answer, so each one gets its own.
     awdlBaStep = 3;
-    awdlBaResponseLength = ItlAWDL::buildAddbaResponse(awdlBaResponse, sizeof(awdlBaResponse), request, awdlOwnAddress, ++awdlBaSequence);
+    awdlBaResponseLength = Aw::buildAddbaResponse(awdlBaResponse, sizeof(awdlBaResponse), request, awdlOwnAddress, ++awdlBaSequence);
 }
 
 void ItlIwx::
@@ -18412,8 +18412,8 @@ awdlBaTxStep(struct iwx_softc *sc)
     ++awdlBaTxAsks;
     if (!awdlBaTxToken)
         awdlBaTxToken = 0x5a;
-    awdlBaResponseLength = ItlAWDL::buildAddbaRequest(awdlBaResponse, sizeof(awdlBaResponse), awdlBaPeer, awdlOwnAddress,
-        kAwdlBssid, awdlBaTxToken, kAwdlBaTxTid, ItlAWDL::kBaWindowMax, awdlBaTxSequence, ++awdlBaSequence);
+    awdlBaResponseLength = Aw::buildAddbaRequest(awdlBaResponse, sizeof(awdlBaResponse), awdlBaPeer, awdlOwnAddress,
+        kAwdlBssid, awdlBaTxToken, kAwdlBaTxTid, Aw::kBaWindowMax, awdlBaTxSequence, ++awdlBaSequence);
 }
 
 bool ItlIwx::
@@ -18427,7 +18427,7 @@ bool ItlIwx::
 awdlBaTxSend(struct iwx_softc *sc, mbuf_t packet)
 {
     if (!awdlBaTx || awdlBaTxState != kBaTxAgreed || awdlBaTxQueue < 0 || mbuf_next(packet) ||
-        mbuf_len(packet) < 24 || !ItlAWDL::sameAddress(static_cast<const uint8_t *>(mbuf_data(packet)) + 4, awdlBaPeer))
+        mbuf_len(packet) < 24 || !Aw::sameAddress(static_cast<const uint8_t *>(mbuf_data(packet)) + 4, awdlBaPeer))
         return false;
     if (!awdlBaTxBulk.bulk) {
         ++awdlBaTxBulkSkipped;
@@ -18436,7 +18436,7 @@ awdlBaTxSend(struct iwx_softc *sc, mbuf_t packet)
     mbuf_t qos = nullptr;
     if (mbuf_getpacket(MBUF_DONTWAIT, &qos) || !qos)
         return false;
-    const size_t length = ItlAWDL::buildQosData(static_cast<const uint8_t *>(mbuf_data(packet)), mbuf_len(packet), kAwdlBaTxTid,
+    const size_t length = Aw::buildQosData(static_cast<const uint8_t *>(mbuf_data(packet)), mbuf_len(packet), kAwdlBaTxTid,
         awdlBaTxSequence, static_cast<uint8_t *>(mbuf_data(qos)), mbuf_maxlen(qos));
     if (!length) {
         mbuf_freem(qos);
@@ -18475,7 +18475,7 @@ awdlCountryScan(struct iwx_softc *sc)
     }
     // The map was refreshed from the firmware's reply earlier in this start.
     const auto &channel149 = sc->sc_ic.ic_channels[149];
-    if (!ItlAWDL::startupScanNeeded(awdlFixedChannel, channel149.ic_freq &&
+    if (!Aw::startupScanNeeded(awdlFixedChannel, channel149.ic_freq &&
             !(channel149.ic_flags & (IEEE80211_CHAN_PASSIVE | IEEE80211_CHAN_DFS | IEEE80211_CHAN_NOADHOC))))
         return;
     AbsoluteTime deadline;
@@ -18529,29 +18529,29 @@ mccProbeTimeout(void *arg)
     if ((IC2IFP(ic)->if_flags & IFF_RUNNING) &&
         !(sc->sc_flags & (IWX_FLAG_HW_ERR | IWX_FLAG_SHUTDOWN | IWX_FLAG_RFKILL))) {
         auto record = [&](uint16_t country, uint8_t source, uint8_t trigger) {
-            ItlAWDL::MccSample sample{};
+            Aw::MccSample sample{};
             sample.uptimeSeconds = mccUptimeSeconds();
             sample.state = uint8_t(ic->ic_state);
             sample.trigger = trigger;
             if (ic->ic_state == IEEE80211_S_RUN && ic->ic_bss && ic->ic_bss->ni_chan)
                 sample.bssChannel = uint8_t(ieee80211_chan2ieee(ic, ic->ic_bss->ni_chan));
             if (that->iwx_mcc_request(sc, country, source, &sample, false) == 0)
-                ItlAWDL::regulatoryAppend(mccSamples, nitems(mccSamples), mccSampleCount, sample);
+                Aw::regulatoryAppend(mccSamples, nitems(mccSamples), mccSampleCount, sample);
         };
         const uint16_t current = 'Z' << 8 | 'Z';
         // Once, the way Linux offers it at startup: the laptop maker's value.
         if (mccBiosCountry && !mccBiosSent) {
             mccBiosSent = true;
-            record(mccBiosCountry, IWX_MCC_SOURCE_BIOS, ItlAWDL::kMccBiosReply);
-            record(current, IWX_MCC_SOURCE_GET_CURRENT, ItlAWDL::kMccRead);
+            record(mccBiosCountry, IWX_MCC_SOURCE_BIOS, Aw::kMccBiosReply);
+            record(current, IWX_MCC_SOURCE_GET_CURRENT, Aw::kMccRead);
         }
         // The firmware's own country and source, as it reported them.
         if (notice) {
             mccEchoAnswered = true;
             mccEchoLastSeconds = mccUptimeSeconds();
-            record(mccEchoCountry, mccEchoSource, ItlAWDL::kMccEchoReply);
+            record(mccEchoCountry, mccEchoSource, Aw::kMccEchoReply);
         }
-        record(current, IWX_MCC_SOURCE_GET_CURRENT, notice ? ItlAWDL::kMccReadAfterNotice : ItlAWDL::kMccRead);
+        record(current, IWX_MCC_SOURCE_GET_CURRENT, notice ? Aw::kMccReadAfterNotice : Aw::kMccRead);
         mccProbePublish();
     }
     if (mccSampleCount < nitems(mccSamples))
@@ -18894,7 +18894,7 @@ iwx_init(struct _ifnet *ifp)
         if (awdlRx) {
             if (awdlRxChannel6) {
                 const auto &candidate = ic->ic_channels[149];
-                awdlFixedChannel = ItlAWDL::fixedChannelFor(awdlWant149,
+                awdlFixedChannel = Aw::fixedChannelFor(awdlWant149,
                     candidate.ic_freq && isset(ic->ic_chan_active, 149),
                     candidate.ic_flags & (IEEE80211_CHAN_PASSIVE | IEEE80211_CHAN_DFS | IEEE80211_CHAN_NOADHOC));
             }
@@ -21619,8 +21619,8 @@ pollLostInterrupt()
     // without a debug build (release kprintf output is invisible).
     if (pending || (msipollChecks % 20) == 0) {
         auto *root = IORegistryEntry::getRegistryRoot();
-        root->setProperty("ITLAWDLPollChecks", msipollChecks, 32);
-        root->setProperty("ITLAWDLPollReaps", msipollReaps, 32);
+        root->setProperty("AwPollChecks", msipollChecks, 32);
+        root->setProperty("AwPollReaps", msipollReaps, 32);
     }
 }
 #endif
@@ -21887,7 +21887,7 @@ iwx_attach(struct iwx_softc *sc, struct pci_attach_args *pa)
         // -itlawdlcoexnoprobe (kills the whole stack), -itlawdlcoexnorx, -itlawdlcoexnotx,
         // -itlawdlcoexnomulti, -itlawdlcoexnodata, -itlawdlcoexnobatx, -itlawdlcoexnopeerpause,
         // -itlawdlcoexnobarefill. -itlawdlrx still selects the dedicated mode instead.
-        awdlCoexProbe = itlAWDLBuildAllowed() && !PE_parse_boot_argn("-itlawdlcoexnoprobe", &dummy, sizeof(dummy)) &&
+        awdlCoexProbe = awBuildAllowed() && !PE_parse_boot_argn("-itlawdlcoexnoprobe", &dummy, sizeof(dummy)) &&
             !PE_parse_boot_argn("-itlawdlrx", &dummy, sizeof(dummy));
         // A new attach in the same loaded image starts with its timers allowed again.
         awdlStopping = false;
@@ -21976,7 +21976,7 @@ iwx_attach(struct iwx_softc *sc, struct pci_attach_args *pa)
             awdlCoexFilter = requestedCoexFilter;
         else if (awdlCoexData)
             awdlCoexFilter = 3; // Data needs it; see awdlCoexMacSend.
-        if (itlAWDLBuildAllowed() && PE_parse_boot_argn("-itlawdlrx", &dummy, sizeof(dummy))) {
+        if (awBuildAllowed() && PE_parse_boot_argn("-itlawdlrx", &dummy, sizeof(dummy))) {
             awdlRx = true;
             awdlQueueProbe = PE_parse_boot_argn("-itlawdlqueue", &dummy, sizeof(dummy));
             awdlRxChannel6 = PE_parse_boot_argn("-itlawdl6", &dummy, sizeof(dummy));
@@ -22010,7 +22010,7 @@ iwx_attach(struct iwx_softc *sc, struct pci_attach_args *pa)
                     awdlBaMacType = requestedMac;
             }
             if (PE_parse_boot_argn("-itlawdlht", &dummy, sizeof(dummy)))
-                awdlDataRate.top = ItlAWDL::kDataRateSteps - 1;
+                awdlDataRate.top = Aw::kDataRateSteps - 1;
             int requestedMoveTest = 0;
             if (PE_parse_boot_argn("itlawdlmovetest", &requestedMoveTest, sizeof(requestedMoveTest)) && requestedMoveTest > 0)
                 awdlMoveTestSeconds = unsigned(requestedMoveTest);
@@ -22029,16 +22029,16 @@ iwx_attach(struct iwx_softc *sc, struct pci_attach_args *pa)
                 requestedCoalescing >= IWX_HOST_INT_TIMEOUT_MIN && requestedCoalescing <= IWX_HOST_INT_TIMEOUT_MAX)
                 awdlIntCoalescing = uint8_t(requestedCoalescing);
             if (PE_parse_boot_argn("itlawdlmcastrepeat", &requestedRepeats, sizeof(requestedRepeats)))
-                awdlMulticastCopies = ItlAWDL::multicastRepeatsFor(requestedRepeats);
+                awdlMulticastCopies = Aw::multicastRepeatsFor(requestedRepeats);
             int requestedWindow = 1;
             if (PE_parse_boot_argn("itlawdlwindow", &requestedWindow, sizeof(requestedWindow)))
-                awdlWindow = ItlAWDL::txWindowFor(requestedWindow);
+                awdlWindow = Aw::txWindowFor(requestedWindow);
             int requestedBtCoex = -1;
             if (PE_parse_boot_argn("itlawdlbtcoex", &requestedBtCoex, sizeof(requestedBtCoex)))
                 awdlBtCoexRequest = requestedBtCoex;
             char requestedCountry[4] = {};
             if (PE_parse_boot_argn("itlawdlcc", requestedCountry, sizeof(requestedCountry)) &&
-                ItlAWDL::validCountry(requestedCountry))
+                Aw::validCountry(requestedCountry))
                 memcpy(awdlCountry, requestedCountry, sizeof(awdlCountry));
             awdlSyncProbe = PE_parse_boot_argn("-itlawdlsyncprobe", &dummy, sizeof(dummy));
             awdlSyncTrain = awdlSyncProbe && PE_parse_boot_argn("-itlawdlsynctrain", &dummy, sizeof(dummy));
@@ -22051,19 +22051,19 @@ iwx_attach(struct iwx_softc *sc, struct pci_attach_args *pa)
             awdlDataTx = awdlMacProbe && PE_parse_boot_argn("-itlawdldatatx", &dummy, sizeof(dummy));
             itlLogOn = true;
             if (OSSerializer *live = OSSerializer::forTarget(nullptr, itlLogSerialize)) {
-                IORegistryEntry::getRegistryRoot()->setProperty("ITLAWDLLog", live);
+                IORegistryEntry::getRegistryRoot()->setProperty("AwLog", live);
                 live->release();
             }
             if (OSSerializer *live = OSSerializer::forTarget(awdlEventLines, itlLogSerialize)) {
-                IORegistryEntry::getRegistryRoot()->setProperty("ITLAWDLEvents", live);
+                IORegistryEntry::getRegistryRoot()->setProperty("AwEvents", live);
                 live->release();
             }
             if (OSSerializer *live = OSSerializer::forTarget(nullptr, awdlSessLogSerialize)) {
-                IORegistryEntry::getRegistryRoot()->setProperty("ITLAWDLSessionEvents", live);
+                IORegistryEntry::getRegistryRoot()->setProperty("AwSessionEvents", live);
                 live->release();
             }
             if (OSSerializer *live = OSSerializer::forTarget(nullptr, awdlTxLogSerialize)) {
-                IORegistryEntry::getRegistryRoot()->setProperty("ITLAWDLTXEvents", live);
+                IORegistryEntry::getRegistryRoot()->setProperty("AwTXEvents", live);
                 live->release();
             }
             ic->ic_opmode = IEEE80211_M_MONITOR;

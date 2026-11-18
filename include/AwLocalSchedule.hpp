@@ -2,10 +2,10 @@
 // synchronization or a transmit timer. Timing semantics cross-checked against
 // seemoo-lab/owl src/sync.c and src/tx.c; independently implemented here.
 #pragma once
-#include <AWDLSyncPrefix.hpp>
-#include <AWDLChannels.hpp>
+#include <AwSyncPrefix.hpp>
+#include <AwChannels.hpp>
 
-namespace ItlAWDL {
+namespace Aw {
 // Caller supplies local identity, explicit flags/periods and one monotonic
 // epoch. Never derive our identity or schedule by replaying a received frame.
 // The 73-byte payload includes the known prefix, presence/counter fields,
@@ -47,4 +47,4 @@ inline BuildResult buildLocalFixedSchedule(const SyncPrefix &settings,
     *written = 73;
     return BuildResult::Ready;
 }
-} // namespace ItlAWDL
+} // namespace Aw

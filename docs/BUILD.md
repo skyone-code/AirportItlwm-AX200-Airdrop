@@ -62,7 +62,7 @@ AWDL 只在三个现代目标上真正启用，靠编译宏区分：
 | AirportItlwm-Sonoma14.4 | `ITL_AWDL_NATIVE` + `ITL_AWDL_GUARD_SONOMA` | 虚表 547 槽，仅 14.8.9 |
 | 其余 AirportItlwm 目标 | — | 编成纯 Wi-Fi，`itlAWDLBuildAllowed()` 恒返回 false |
 
-`AirportItlwm/AWDLBuildGuard.cpp` 是唯一新增的编译单元，已加入 Tahoe/Sonoma14.4 共用的 Sources 阶段与 Sequoia 的 Sources 阶段。其余 AWDL 代码都写在既有文件里（`AirportItlwmV2.cpp`、`AirportItlwmSkywalkInterface.cpp`、`WCL.cpp`、`itlwm/hal_iwx/ItlIwx.cpp` 等），以 `#if defined(ITL_AWDL_NATIVE)` 围起来。
+`AirportItlwm/hf58f.cpp` 是唯一新增的编译单元，已加入 Tahoe/Sonoma14.4 共用的 Sources 阶段与 Sequoia 的 Sources 阶段。其余 AWDL 代码都写在既有文件里（`AirportItlwmV2.cpp`、`AirportItlwmSkywalkInterface.cpp`、`WCL.cpp`、`itlwm/hal_iwx/ItlIwx.cpp` 等），以 `#if defined(ITL_AWDL_NATIVE)` 围起来。
 
 ## 构建后的自检
 

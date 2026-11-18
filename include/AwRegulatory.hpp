@@ -3,7 +3,7 @@
 #pragma once
 #include <stdint.h>
 #include <stddef.h>
-namespace ItlAWDL {
+namespace Aw {
 // The firmware's reply lists channel flags in the order of the NVM channel table.
 inline bool regulatoryChannelFlags(const uint8_t *table, size_t tableCount, uint8_t channel,
                                    const uint32_t *flags, size_t flagCount, uint32_t *out) {

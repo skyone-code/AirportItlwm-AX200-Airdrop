@@ -4,9 +4,9 @@
 // captured peer frame. No code was copied and no peer frame is replayed: all
 // values are our own address, metric and schedule, or fixed constants.
 #pragma once
-#include <AWDLDataPayload.hpp>
-#include <AWDLChannels.hpp>
-namespace ItlAWDL {
+#include <AwDataPayload.hpp>
+#include <AwChannels.hpp>
+namespace Aw {
 constexpr size_t peerTLVPrefixBytes = 24 + 44;  // Election (5), channel sequence (18).
 constexpr size_t peerTLVSuffixBytes = 12;       // Data rate capabilities (7).
 // Adds TLVs 5 and 18 before the native template's TLVs and 7 after them. Our

@@ -141,7 +141,7 @@
 #include <HAL/ItlDriverInfo.hpp>
 #include <HAL/ItlDriverController.hpp>
 
-namespace ItlAWDL { struct MccSample; }
+namespace Aw { struct MccSample; }
 
 class ItlIwx : public ItlHalService, ItlDriverInfo, ItlDriverController {
     OSDeclareDefaultStructors(ItlIwx)
@@ -500,7 +500,7 @@ public:
     int    iwx_send_bt_init_conf(struct iwx_softc *);
     int    iwx_send_soc_conf(struct iwx_softc *);
     int    iwx_send_update_mcc_cmd(struct iwx_softc *, const char *);
-    int    iwx_mcc_request(struct iwx_softc *, uint16_t, uint8_t, ItlAWDL::MccSample *, bool);
+    int    iwx_mcc_request(struct iwx_softc *, uint16_t, uint8_t, Aw::MccSample *, bool);
     bool    awdlCountryAnswer(struct iwx_softc *);
     void    awdlBaHandle(struct iwx_softc *);
     void    awdlBaTxStep(struct iwx_softc *);

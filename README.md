@@ -71,7 +71,7 @@ xcodebuild -project itlwm.xcodeproj -scheme AirportItlwm-Tahoe \
 ioreg -rn AirportItlwm | grep -E "AWDLBuildCheck|AWDLActivationBlocked|AWDLNativeUp|AWDLMiState"
 ```
 
-正常应看到 `ItlwmAWDLBuildCheck = verified`、`ItlwmAWDLNativeUp = Yes`。判读表与抓日志方法见 [docs/DIAGNOSTICS.md](docs/DIAGNOSTICS.md)。
+正常应看到 `r2vhjBuildCheck = verified`、`r2vhjNativeUp = Yes`。判读表与抓日志方法见 [docs/DIAGNOSTICS.md](docs/DIAGNOSTICS.md)。
 
 ## 它是怎么工作的
 
@@ -81,7 +81,7 @@ AWDL 接口继承 Apple 的 `IO80211AWDLProtocol`，在 5 GHz 上用 16 个 lega
 
 ```
 AirportItlwm/          kext 主体，AWDL 接口与集成点在这里
-  AWDLBuildGuard.cpp   运行时校验：系统构建 + Apple 虚表指纹
+  hf58f.cpp   运行时校验：系统构建 + Apple 虚表指纹
 include/               AWDL 协议实现（帧、调度、探测、监管域……）与 Apple 私有头
 itl80211/ itlwm/       net80211 与 iwlwifi 移植（上游）
 itlwm.xcodeproj        构建工程

@@ -1,6 +1,6 @@
 #pragma once
 #include <stdint.h>
-namespace ItlAWDL {
+namespace Aw {
 // A peer-gated train is about 173 s of airtime at the nominal 110 TU interval.
 constexpr unsigned probeLimit(bool fast, bool peerGated = false) {
     return peerGated ? 1536U : fast ? 64U : 8U;

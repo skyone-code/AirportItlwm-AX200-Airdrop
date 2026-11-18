@@ -5,7 +5,7 @@
 #pragma once
 #include <stdint.h>
 #include <stddef.h>
-namespace ItlAWDL {
+namespace Aw {
 constexpr unsigned kTxBurstCapacity = 8;
 constexpr unsigned kTxFrameBytes = 1600;
 constexpr unsigned txWindowFor(int requested) {

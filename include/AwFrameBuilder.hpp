@@ -2,9 +2,9 @@
 // Wire layout cross-checked against the pinned RTW89 reference used by the RX
 // parser. The caller supplies its own schedule and native-generated static TLVs.
 #pragma once
-#include <AWDLFrameParser.hpp>
+#include <AwFrameParser.hpp>
 
-namespace ItlAWDL {
+namespace Aw {
 enum class BuildResult { Invalid, NoSpace, Ready };
 struct LocalFrame {
     uint8_t source[6];
@@ -136,4 +136,4 @@ inline bool stripDataPathInfra(uint8_t *tlvs, size_t *length)
     }
     return false;
 }
-} // namespace ItlAWDL
+} // namespace Aw
