@@ -53,8 +53,28 @@ enum : uint8_t {
     kSubRemoteFeatures = 0x04,
     kSubConnCompleteEnhanced = 0x0a,
     kSubConnCompleteEnhancedV2 = 0x0b,
+    kSubExtAdvReport = 0x0d,
 };
 inline uint16_t opcodeOf(const uint8_t *hci) { return uint16_t(hci[0] | hci[1] << 8); }
+// Does this read carry an HCI event? The interrupt-IN pipe has to be found without the constructor
+// hook that used to record it: on this build that symbol no longer exists, so the pipe object was
+// never known and no read was ever wrapped, which is why every event-side witness stayed empty while
+// the controller was in fact reporting. A read that starts with a known event code and whose length
+// byte agrees with the transfer is the pipe identifying itself, which no symbol lookup has to be
+// trusted for.
+inline bool looksLikeHciEvent(const uint8_t *event, size_t size) {
+    if (!event || size < 3)
+        return false;
+    switch (event[0]) {
+    case kEvtDisconnComplete:
+    case kEvtCmdComplete:
+    case kEvtCmdStatus:
+    case kEvtLeMeta:
+        return size_t(event[1]) + 2 == size;
+    default:
+        return false;
+    }
+}
 // A 12-bit connection handle out of two event bytes; the top nibble carries flags.
 inline uint16_t connHandle(uint8_t low, uint8_t high) { return uint16_t((low | high << 8) & 0x0fff); }
 inline bool addressEquals(const uint8_t *a, const uint8_t *b) {
@@ -62,6 +82,48 @@ inline bool addressEquals(const uint8_t *a, const uint8_t *b) {
         if (a[i] != b[i])
             return false;
     return true;
+}
+
+// bluetoothd asks the controller to find the phone by its identity address on the filter accept list.
+// Nothing on the air ever carries that address: the phone rotates a resolvable private address and
+// bluetoothd resolves it in user space, so a controller holding no IRK compares six literal bytes
+// against a value that never appears and waits out the whole create timeout. The one form it can act
+// on is filter policy 0 with the rotating address written into the peer field. Only that exact shape
+// is touched - a create that already names a peer, or that uses any other policy, stays byte for byte
+// as bluetoothd wrote it.
+enum : uint8_t {
+    kCreatePolicyPeer = 0x00,
+    kCreatePolicyAcceptList = 0x01,
+};
+// Whether to rewrite an incoming create and where its peer bytes landed. A create that already
+// names a peer, or that uses any other policy, stays byte for byte as bluetoothd wrote it. Both
+// forms share the guard - filter policy 1 (accept list) with every peer byte zero, the shape the
+// host sends when it expects the controller to resolve identity addresses, which this controller
+// cannot do - and both are rewritten to name the rotating address directly. Returns the offset of
+// the six peer bytes (6 for the extended form, 9 for the legacy one) or 0 when untouched.
+inline size_t rewriteCreateToPrivateAddress(uint8_t *hci, size_t length, const uint8_t *addr, bool fresh) {
+    if (!hci || !addr || !fresh || length < 12)
+        return 0;
+    const uint16_t op = opcodeOf(hci);
+    unsigned peerAt = 0;
+    if (op == OpLeExtCreateConn && length >= 12 && hci[3] == kCreatePolicyAcceptList)
+        peerAt = 6;
+    else if (op == OpLeCreateConn && length >= 15 && hci[7] == kCreatePolicyAcceptList)
+        peerAt = 9;
+    if (!peerAt)
+        return 0;
+    for (unsigned i = 0; i < 6; ++i)
+        if (hci[peerAt + i])
+            return 0;
+    if (peerAt == 6) {
+        hci[3] = kCreatePolicyPeer;
+        hci[5] = 0x01;      // peer address type: random
+    } else {
+        hci[7] = kCreatePolicyPeer;
+        hci[8] = 0x01;      // peer address type: random
+    }
+    memcpy(hci + peerAt, addr, 6);
+    return peerAt;
 }
 
 // ---- what the host has asked the controller for ----------------------------------------
@@ -720,26 +782,38 @@ inline bool payloadRange(const uint8_t *hci, size_t length, PayloadRange *out) {
     out->length = dataLength;
     return dataLength > 0;
 }
-// One advertising report out of an LE Meta Event 0x02. The event type byte is the fact that decides
-// whether a create can succeed, because only a connectable report lets the controller answer with
-// CONNECT_IND: 0x00 ADV_IND and 0x01 ADV_DIRECT_IND are connectable, 0x02 ADV_SCAN_IND and 0x03
-// ADV_NONCONN_IND are not, and the extended forms 0x0d-0x13 carry the bit in their own encoding.
+// One advertising report. The event type is the fact that decides whether a create can succeed,
+// because only a connectable report lets the controller answer with CONNECT_IND: 0x00 ADV_IND and
+// 0x01 ADV_DIRECT_IND are connectable, 0x02 ADV_SCAN_IND and 0x03 ADV_NONCONN_IND are not.
+//
+// Two wire formats carry this, and which one arrives is not a detail: a host that scans with the
+// extended commands only ever sees subevent 0x0d, whose per-report header is 24 bytes and whose type
+// is a 16-bit flag word. Reading 0x0d with the legacy layout lands six bytes off, so the address it
+// reports is the tail of the previous field - the reason the accept list address looked like it was
+// never heard on the air. Both are folded into one shape here, with kReportExtended marking the ones
+// that came from 0x0d, so the witnesses above cannot tell them apart by accident.
 struct Report {
-    uint8_t eventType, addr[6], rssi;
+    uint8_t eventType, addrType, addr[6], rssi;
+    bool extended;
     uint32_t appleTypes;
 };
-inline int parseReports(const uint8_t *event, size_t size, Report *out, int max) {
-    if (!event || !out || max <= 0 || size < 6 || event[0] != kEvtLeMeta || event[2] != kSubAdvReport)
-        return 0;
+enum : uint8_t { kReportExtended = 0x80 };
+inline bool reportConnectable(uint8_t eventType) { return (eventType & 0x7f) <= 0x01; }
+// A resolvable private address sets the top two bits of its most significant byte to 01.
+inline bool addressResolvable(const uint8_t *addr) { return (addr[5] & 0xc0) == 0x40; }
+
+inline int parseLegacyReports(const uint8_t *event, size_t size, Report *out, int max) {
     const uint8_t count = event[3];
     size_t offset = 4;
     int items = 0;
-    for (unsigned r = 0; r < count && items < max && offset + 9 <= size; ++r) {
+    for (unsigned r = 0; r < count && items < max && offset + 10 <= size; ++r) {
         const size_t dataLength = event[offset + 8];
         if (offset + 9 + dataLength + 1 > size)
             break;
         Report &item = out[items++];
         item.eventType = event[offset];
+        item.addrType = 0;      // the legacy report has no type field; the event type carries it
+        item.extended = false;
         memcpy(item.addr, event + offset + 2, 6);
         item.rssi = event[offset + 9 + dataLength];
         item.appleTypes = 0;
@@ -747,5 +821,45 @@ inline int parseReports(const uint8_t *event, size_t size, Report *out, int max)
         offset += 9 + dataLength + 1;
     }
     return items;
+}
+// Subevent 0x0d: type[2] addrType[1] addr[6] pHY[1] sPHY[1] sid[1] txPower[1] rssi[1] interval[2]
+//                 directType[1] direct[6] dataLength[1] data[...]
+inline int parseExtendedReports(const uint8_t *event, size_t size, Report *out, int max) {
+    const uint8_t count = event[3];
+    size_t offset = 4;
+    int items = 0;
+    for (unsigned r = 0; r < count && items < max && offset + 24 <= size; ++r) {
+        const uint16_t flags = uint16_t(event[offset] | event[offset + 1] << 8);
+        const size_t dataLength = event[offset + 23];
+        if (offset + 24 + dataLength > size)
+            break;
+        Report &item = out[items++];
+        // Fold the flag word into the legacy numbering so a caller only has one thing to compare.
+        uint8_t type = 0x03;
+        if (flags & 0x0004)
+            type = 0x01;            // directed
+        else if (flags & 0x0001)
+            type = 0x00;            // connectable, undirected
+        else if (flags & 0x0002)
+            type = 0x02;            // scannable, not connectable
+        item.eventType = uint8_t(type | kReportExtended);
+        item.addrType = event[offset + 2];
+        item.extended = true;
+        memcpy(item.addr, event + offset + 3, 6);
+        item.rssi = event[offset + 13];
+        item.appleTypes = 0;
+        appleTypeIds(event + offset + 24, dataLength, &item.appleTypes);
+        offset += 24 + dataLength;
+    }
+    return items;
+}
+inline int parseReports(const uint8_t *event, size_t size, Report *out, int max) {
+    if (!event || !out || max <= 0 || size < 6 || event[0] != kEvtLeMeta)
+        return 0;
+    if (event[2] == kSubAdvReport)
+        return parseLegacyReports(event, size, out, max);
+    if (event[2] == kSubExtAdvReport)
+        return parseExtendedReports(event, size, out, max);
+    return 0;
 }
 }
