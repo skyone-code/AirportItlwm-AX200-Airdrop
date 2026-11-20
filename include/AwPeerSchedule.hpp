@@ -20,15 +20,16 @@ constexpr uint64_t kPeerScheduleStaleUS = 2000000;  // No sync heard for this lo
 constexpr uint64_t kPeerPauseEarlyUS = 3000;        // Pause this long before the peer leaves.
 constexpr uint64_t kPeerResumeLateUS = 1000;        // Resume this long after it returns.
 constexpr uint64_t kPeerPauseMaxUS = 150000;        // Longest pause when the away run isn't known.
-constexpr uint64_t kPeerPauseCeilingUS = 450000;    // Longest pause even for a long predicted run.
 constexpr uint64_t kPeerEdgeUS = 1500;              // Frames this close to an entry edge aren't counted.
 constexpr uint32_t kPeerCalibrateFrames = 300;
-constexpr uint32_t kPeerCalibrateMaxAwayPercent = 3;
+// How much of the peer's traffic may land in entries the sequence calls away and still count as a
+// calibration. At 3% it never happened on the phones measured here: 1,354 sync frames were binned and
+// the offset was still never accepted, so the gate kept working from the assumed offset 0 and closed on
+// the wrong entries. Displacement is not a subtle signal -- an offset off by one entry moves the whole
+// present set into away entries, which reads as ~100% -- so 10% separates the right offset from every
+// wrong one and still leaves room for edge jitter. The refutation test below stays well clear of it.
+constexpr uint32_t kPeerCalibrateMaxAwayPercent = 10;
 constexpr uint64_t kPeerPhaseJumpUS = 8192;
-// iface161: a peer whose sequence has this many entries or fewer on our channel is in an idle schedule
-// (Idle 5, Infra Priority 2, Low Power 2 in the phone's logs; data modes have 7, 11 or 15). Unless it sent us
-// data recently it is then only reliably awake at the start of each AW.
-constexpr unsigned kPeerDozeMaxEntries = 5;
 
 struct PeerSyncInfo {
     uint16_t awCounter, downCounterTU, awPeriodTU;
@@ -92,6 +93,11 @@ struct PeerSchedule {
     bool calibrated;
     uint8_t offset;
     uint32_t sequenceChanges, calibrations, decalibrations;
+    // Why a calibration did not happen, for the registry: the frames binned so far and the best and
+    // second-best away-share each pass computed. A best above the allowance means the peer's timing
+    // does not fit the assumed sequence; a second equal to the best means the bins cannot tell offsets
+    // apart (too few frames, or the peer transmits outside its own windows).
+    uint32_t calibAttempts, calibBinFrames, calibBest, calibSecond;
     // Checked after calibration: frames heard during entries that say the peer is away.
     uint32_t checkedFrames, awayFrames;
     uint32_t lastAwayEntry;
@@ -119,6 +125,20 @@ struct PeerSchedule {
     unsigned presentEntries() const {
         unsigned n = 0;
         for (unsigned k = 0; k < kPeerSeqEntries; ++k) n += channels[k] == ourChannel;
+        return n;
+    }
+    // How many entries this sequence dedicates to an arbitrary channel, and how many carry a channel at
+    // all. Picking a channel is otherwise blind: the listener sits on one and only sees its own share,
+    // so "would another channel have more windows" could not be answered from the registry. With these
+    // two, a move that is worth making (and one that is not) is a number rather than an argument.
+    unsigned entriesOnChannel(uint8_t ch) const {
+        unsigned n = 0;
+        for (unsigned k = 0; k < kPeerSeqEntries; ++k) n += channels[k] == ch;
+        return n;
+    }
+    unsigned entriesWithChannel() const {
+        unsigned n = 0;
+        for (unsigned k = 0; k < kPeerSeqEntries; ++k) n += channels[k] != 0;
         return n;
     }
     void clearEvidence() {
@@ -187,7 +207,9 @@ struct PeerSchedule {
                 ++awayFrames;
             }
             // A single RX burst can distort timing. Require contradictions across entries.
-            if (checkedFrames >= 200 && multipleAwayEntries && awayFrames * 10 > checkedFrames) {
+            // Refute only past 20%, twice the calibration allowance above: at the same 10% a freshly
+            // accepted offset sat exactly on the line and its own evidence could revoke it.
+            if (checkedFrames >= 200 && multipleAwayEntries && awayFrames * 5 > checkedFrames) {
                 if (calibrated) ++decalibrations;
                 else ++refutations;
                 calibrated = false;
@@ -220,6 +242,10 @@ struct PeerSchedule {
             if (inAway < best) { second = best; best = inAway; bestOffset = uint8_t(r); }
             else if (inAway < second) second = inAway;
         }
+        ++calibAttempts;
+        calibBinFrames = binFrames;
+        calibBest = best == 0xffffffff ? 0 : best;
+        calibSecond = second == 0xffffffff ? 0 : second;
         if (best * 100 > binFrames * kPeerCalibrateMaxAwayPercent || second <= best) return;
         offset = bestOffset;
         calibrated = true;
@@ -263,15 +289,23 @@ struct PeerSchedule {
         return 0;
     }
     // How long a pause starting at `t` may last: through the run of away entries that is current or
-    // about to start, plus the margins and 2 ms, at most kPeerPauseCeilingUS.
+    // about to start, plus the margins and 2 ms, at most one full sequence period. The fixed 450 ms
+    // ceiling used to cut every long away run in half: the phones here keep 12 of 16 entries away from
+    // our channel, a full run is 14 entries x 65.5 ms = 917 ms, so the gate always reopened mid-run and
+    // every frame sent until the peer came back was a frame with nobody listening (56 forced sends per
+    // session, and the stalls that followed them). The limit is still the exact distance to the next
+    // present entry, and it is only computed from a fresh schedule; when that is missing the pause
+    // falls back to kPeerPauseMaxUS as before. Late completions are safe: the send gate reopening does
+    // not mean the peer is there, and a frame that waits is cheaper than a frame that is dropped.
     uint64_t pauseLimitUS(uint64_t t) const {
         if (!known() || !fresh(t) || !eawUS) return kPeerPauseMaxUS;
         uint64_t into = 0;
         uint32_t eaw = eawAt(t, &into);
+        const uint64_t ceiling = eawUS * kPeerSeqEntries;
         uint64_t limit = kPeerPauseEarlyUS + kPeerResumeLateUS + 2000;
         if (presentInEntry(eaw)) { limit += eawUS - into; ++eaw; } else { limit -= kPeerPauseEarlyUS; limit += eawUS - into; ++eaw; }
         for (unsigned k = 0; k < kPeerSeqEntries && !presentInEntry(eaw); ++k, ++eaw) limit += eawUS;
-        return limit > kPeerPauseCeilingUS ? kPeerPauseCeilingUS : limit;
+        return limit > ceiling ? ceiling : limit;
     }
     // Whether sending should be paused at `t`: within the early margin before an away entry,
     // during it, or within the late margin after it.

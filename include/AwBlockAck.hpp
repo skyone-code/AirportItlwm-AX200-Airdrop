@@ -21,6 +21,9 @@ struct AddbaRequest {
 struct PendingAddbaRequests {
     bool empty() const { return !pending; }
     bool has(unsigned tid) const { return tid < 8 && (pending & (1U << tid)); }
+    // The pending mask itself, for the slot telemetry: a slot stuck on one unanswered TID has to be
+    // tellable from one that simply never asked.
+    uint8_t mask() const { return pending; }
     void clear() { pending = 0; }
     void discard(unsigned tid) {
         if (has(tid))
