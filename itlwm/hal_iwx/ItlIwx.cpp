@@ -6399,14 +6399,17 @@ static void awdlCoexRateWindowJudge(void)
     const uint32_t window = awdlCoexRateWindowOK + awdlCoexRateWindowFailed;
     if (window < 64)
         return;
-    if (awdlCoexRateWindowFailed * 5 > window) {
-        ++awdlCoexRateBadStreak;
-        if (awdlCoexRateBadStreak >= 2 && awdlCoexRateStep > 0) {
-            --awdlCoexRateStep;
-            ++awdlCoexRateDowns;
-            awdlCoexRateBadStreak = 0;
-        }
-    } else {
+        if (awdlCoexRateWindowFailed * 5 > window) {
+            // Capped at 2: past the demote threshold more bad windows say nothing new, and at
+            // step 0 (nothing left to demote) an unbounded streak would grow for ever.
+            if (awdlCoexRateStep > 0 && awdlCoexRateBadStreak < 2)
+                ++awdlCoexRateBadStreak;
+            if (awdlCoexRateBadStreak >= 2 && awdlCoexRateStep > 0) {
+                --awdlCoexRateStep;
+                ++awdlCoexRateDowns;
+                awdlCoexRateBadStreak = 0;
+            }
+        } else {
         awdlCoexRateBadStreak = 0;
         if (awdlCoexRateWindowFailed * 8 < window &&
             awdlCoexRateStep + 1 < (awdlCoexOwnWidth == 80 ? nitems(kAwdlCoexRateMcs) : 4U)) {
@@ -6446,8 +6449,9 @@ static bool awdlCoexHeTxWantedSlot(unsigned slot)
 
 // Whether this slot's aggregates may go out at a fixed rate at all, either flavour. The
 // no-completion watchdog lives here so both flavours are covered: a firmware that never completes
-// the fixed rate must not keep the queue hostage.
-static bool awdlCoexFixedRateSlot(unsigned slot)
+// the fixed rate must not keep the queue hostage. heOut reports the flavour chosen, so the TX
+// call site does not have to re-evaluate awdlCoexHeTxWantedSlot (another clock read) per frame.
+static bool awdlCoexFixedRateSlot(unsigned slot, bool *heOut = nullptr)
 {
     auto &s = awdlCoexBaSlots[slot];
     if (awdlCoexHeTxOff || s.heDemoted)
@@ -6458,8 +6462,11 @@ static bool awdlCoexFixedRateSlot(unsigned slot)
         ++awdlCoexHeTxDemotes;
         return false;
     }
-    if (awdlCoexHeTxWantedSlot(slot))
+    if (awdlCoexHeTxWantedSlot(slot)) {
+        if (heOut)
+            *heOut = true;
         return true;
+    }
     if (awdlCoexVhtFixedOff || !s.peerAdded || s.txState != kCoexBaTxAgreed)
         return false;
     return true;
@@ -6564,7 +6571,7 @@ static bool awdlCoexAwHold;
 // kept apart, so the first negotiation survives the ring wrapping.
 struct AwdlCoexBaEvent { uint32_t ms; char type; uint16_t a, b; uint8_t c; uint16_t d, id; };
 static AwdlCoexBaEvent awdlCoexBaEvents[256], awdlCoexBaEventsFirst[64];
-static uint32_t awdlCoexBaEventCount;
+static uint32_t awdlCoexBaEventCount, awdlCoexBaEventFirstCount;
 static int awdlCoexBaEventLastState = -1;
 static void awdlCoexBaEvent(char type, unsigned a, unsigned b, unsigned c, unsigned d = 0, unsigned id = 0)
 {
@@ -6573,8 +6580,10 @@ static void awdlCoexBaEvent(char type, unsigned a, unsigned b, unsigned c, unsig
     absolutetime_to_nanoseconds(up, &ns);
     const AwdlCoexBaEvent e{uint32_t(ns / 1000000ULL), type, uint16_t(a), uint16_t(b), uint8_t(c), uint16_t(d),
                             uint16_t(id)};
-    if (awdlCoexBaEventCount < nitems(awdlCoexBaEventsFirst))
-        awdlCoexBaEventsFirst[awdlCoexBaEventCount] = e;
+    // A separate saturating counter: awdlCoexBaEventCount itself wraps at 2^32 and would let the
+    // wrapped count overwrite the first-64 record with session garbage.
+    if (awdlCoexBaEventFirstCount < nitems(awdlCoexBaEventsFirst))
+        awdlCoexBaEventsFirst[awdlCoexBaEventFirstCount++] = e;
     awdlCoexBaEvents[awdlCoexBaEventCount++ % nitems(awdlCoexBaEvents)] = e;
 }
 // Eavesdrop (read-only): with promiscuous receive open, frames one phone sends another arrive too.
@@ -8335,16 +8344,18 @@ awdlCoexTxTask(void *arg)
         // Setup waits on the firmware; detach or a RUN exit may have come meanwhile.
         // With the data pump the task runs every few milliseconds; sync frames keep their own pace.
         const uint64_t taskNowUS = awdlUptimeUS();
+        // One evaluation covers the three reads below; nothing between them mutates the schedule state.
+        const bool schedCurrent = awdlCoexScheduleCurrent();
         // Sync pacing. While data moves, every 100 ms. While idle, every 45 ms as dedicated mode did
         // (kSyncIdleIntervalUS), and with -itlawdlawsync also at the start of the phone's AWs on our channel,
         // at most one per 8 ms (iface106): an idle phone is reliably awake only then.
         const bool coexDataActive = awdlCoexLastDataUS && taskNowUS - awdlCoexLastDataUS < 1000000ULL;
-        awdlCoexScheduleCalibrated = awdlCoexScheduleCurrent() && awdlCoexPeerSchedule.calibrated &&
+        awdlCoexScheduleCalibrated = schedCurrent && awdlCoexPeerSchedule.calibrated &&
             awdlCoexPeerSchedule.fresh(taskNowUS);
         const uint64_t sinceSync = taskNowUS - awdlCoexLastSyncUS;
-        const bool awTimingUsable = (awdlCoexScheduleCurrent() && awdlCoexPeerSchedule.known() &&
+        const bool awTimingUsable = (schedCurrent && awdlCoexPeerSchedule.known() &&
                                      awdlCoexPeerSchedule.fresh(taskNowUS)) ||
-            (awdlCoexAwSyncAssume && awdlCoexScheduleCurrent() &&
+            (awdlCoexAwSyncAssume && schedCurrent &&
              awdlCoexPeerSchedule.timingUsable(taskNowUS, true));
         const bool awTimed = awdlCoexData && awdlAwSync && !coexDataActive && sinceSync >= kAwdlAwSyncMinGapUS &&
             awTimingUsable &&
@@ -8795,8 +8806,14 @@ awdlCoexBaSlotRemovePeer(struct iwx_softc *sc, unsigned slot)
     s.txState = kCoexBaTxOff;
     s.txQueue = -1;
     s.txBulk = Aw::BaTxBulkState{};
-    awdlCoexRateStep = 0;
-    awdlCoexRateWindowOK = awdlCoexRateWindowFailed = 0;
+    if (slot == 0) {
+        // The rate ladder and its window are global and only slot 0's singles ride them. A slot
+        // 1..N-1 removal (yield handover iface149, idle teardown) used to drop slot 0's transfer
+        // back to 24 Mbit/s singles mid-flight and made the ladder climb again from nothing.
+        awdlCoexRateStep = 0;
+        awdlCoexRateWindowOK = awdlCoexRateWindowFailed = 0;
+        awdlCoexRateBadStreak = 0;
+    }
     s.peerHeUS = 0;
     s.heDemoted = false;
     s.hePoorAcks = 0;
@@ -11575,11 +11592,12 @@ iwx_rx_tx_ba_notif(struct iwx_softc *sc, struct iwx_rx_packet *pkt, struct iwx_r
             continue;
         ring = &sc->txq[qid];
         const bool awdlBaQueue = int(qid) == awdlBaTxQueue;
-        const bool coexQueue = (awdlCoexQueue >= 0 && int(qid) == awdlCoexQueue) ||
-            (awdlCoexOrphanQueue >= 0 && int(qid) == awdlCoexOrphanQueue) ||
-            awdlCoexBaSlotQueue(int(qid));
         unsigned notifSlot = 0;
+        // One scan fills both answers: the second identical awdlCoexBaSlotQueue call ran per TFD record.
         const bool coexBaQueue = awdlCoexBaSlotQueue(int(qid), &notifSlot);
+        const bool coexQueue = coexBaQueue ||
+            (awdlCoexQueue >= 0 && int(qid) == awdlCoexQueue) ||
+            (awdlCoexOrphanQueue >= 0 && int(qid) == awdlCoexOrphanQueue);
         if (coexBaQueue) {
             auto &ns = awdlCoexBaSlots[notifSlot];
             coexNotified = true;
@@ -13351,28 +13369,21 @@ iwx_tx(struct iwx_softc *sc, mbuf_t m, struct ieee80211_node *ni, int ac, int mo
 {
     // Receive/queue-allocation experiments must not submit even incidental
     // network traffic to a newly allocated firmware queue.
-    if (!awdlRx && awdlCoexData && monitorQueue >= 0 && monitorQueue == awdlCoexBaTxQueue) {
-        // The listener peer's aggregation queue: only AWDL data the pump converted, while the session is up.
-        if (!awdlCoexBaSendingAgg || awdlCoexBaTxState != kCoexBaTxAgreed || !awdlCoexBaPeerAdded ||
-            !awdlCoexAdded || awdlCoexGeneration != sc->sc_generation || !getMainWorkLoop()->inGate() ||
-            sc->sc_ic.ic_opmode != IEEE80211_M_STA ||
-            (!(awdlCoexMulti && awdlCoexMultiActive) && sc->sc_ic.ic_state != IEEE80211_S_RUN) || mbuf_next(m) ||
-            mbuf_len(m) != mbuf_pkthdr_len(m) || mbuf_len(m) > 2304 || !awdlMonitorRequestValidCoex(m)) {
-            mbuf_freem(m);
-            return EACCES;
-        }
-    } else if (!awdlRx && awdlCoexData && monitorQueue >= 0 && awdlCoexBaQueueSlot(monitorQueue) > 0) {
-        // A second peer's aggregation queue: the same rules as the listener peer's, checked against the slot
-        // that owns the queue. Without this the frame fell into the monitor-mode branch below and every
-        // submission was refused before it ever reached the firmware.
-        const auto &baPeer = awdlCoexBaSlots[awdlCoexBaQueueSlot(monitorQueue)];
-        if (!awdlCoexBaSendingAgg || baPeer.txState != kCoexBaTxAgreed || !baPeer.peerAdded ||
-            !awdlCoexAdded || awdlCoexGeneration != sc->sc_generation || !getMainWorkLoop()->inGate() ||
-            sc->sc_ic.ic_opmode != IEEE80211_M_STA ||
-            (!(awdlCoexMulti && awdlCoexMultiActive) && sc->sc_ic.ic_state != IEEE80211_S_RUN) || mbuf_next(m) ||
-            mbuf_len(m) != mbuf_pkthdr_len(m) || mbuf_len(m) > 2304 || !awdlMonitorRequestValidCoex(m)) {
-            mbuf_freem(m);
-            return EACCES;
+    if (!awdlRx && awdlCoexData && monitorQueue >= 0) {
+        // The listener peer's aggregation queue (slot 0) and any second peer's (slots 1..N-1) share
+        // one rule set, checked against the slot that owns the queue. Without the second-peer case
+        // the frame fell into the monitor-mode branch below and every submission was refused.
+        const int baSlotIdx = monitorQueue == awdlCoexBaTxQueue ? 0 : awdlCoexBaQueueSlot(monitorQueue);
+        if (baSlotIdx >= 0) {
+            const auto &baPeer = awdlCoexBaSlots[unsigned(baSlotIdx)];
+            if (!awdlCoexBaSendingAgg || baPeer.txState != kCoexBaTxAgreed || !baPeer.peerAdded ||
+                !awdlCoexAdded || awdlCoexGeneration != sc->sc_generation || !getMainWorkLoop()->inGate() ||
+                sc->sc_ic.ic_opmode != IEEE80211_M_STA ||
+                (!(awdlCoexMulti && awdlCoexMultiActive) && sc->sc_ic.ic_state != IEEE80211_S_RUN) || mbuf_next(m) ||
+                mbuf_len(m) != mbuf_pkthdr_len(m) || mbuf_len(m) > 2304 || !awdlMonitorRequestValidCoex(m)) {
+                mbuf_freem(m);
+                return EACCES;
+            }
         }
     } else if (!awdlRx && awdlCoexTx && monitorQueue >= 0 && monitorQueue == awdlCoexQueue) {
         // The second context's frames: only valid AWDL action frames, in the gate, while it exists.
@@ -13501,17 +13512,27 @@ iwx_tx(struct iwx_softc *sc, mbuf_t m, struct ieee80211_node *ni, int ac, int mo
     
     rinfo = iwx_tx_fill_cmd(sc, in, wh, &flags, &rate_n_flags);
 
+    // Firmware-wide constants for the three fixed-rate blocks: the original code ran a linear scan
+    // over the command-version table (plus the antenna check) up to twice per data frame, yet neither
+    // value can change within one firmware generation -- only a reload bumps sc_generation.
+    static uint8_t txFixedCmdVersion, txFixedAntennaMask;
+    static uint32_t txFixedCapGeneration = 0;
+    if (txFixedCapGeneration != sc->sc_generation) {
+        txFixedCmdVersion = iwx_lookup_cmd_ver(sc, IWX_LONG_GROUP, IWX_TX_CMD);
+        const uint8_t ab = IWX_RATE_MCS_ANT_AB_MSK >> IWX_RATE_MCS_ANT_POS;
+        txFixedAntennaMask = (iwx_fw_valid_tx_ant(sc) & ab) == ab ? ab : 0;
+        txFixedCapGeneration = sc->sc_generation;
+    }
+    const bool txFixedCapable = txFixedCmdVersion > 8 && txFixedCmdVersion != IWX_FW_CMD_VER_UNKNOWN &&
+        txFixedAntennaMask;
+
     if (awdlBaTxFixedMcs >= 0 && awdlDataInFlight == 3 && awdlBaTx80Active && awdlWide80Live &&
-        !awdlWide80Refused && awdlFixedChannel == 149 && type == IEEE80211_FC0_TYPE_DATA) {
-        const uint8_t cmdVersion = iwx_lookup_cmd_ver(sc, IWX_LONG_GROUP, IWX_TX_CMD);
-        const uint8_t antennas = IWX_RATE_MCS_ANT_AB_MSK >> IWX_RATE_MCS_ANT_POS;
-        if (cmdVersion > 8 && cmdVersion != IWX_FW_CMD_VER_UNKNOWN &&
-            (iwx_fw_valid_tx_ant(sc) & antennas) == antennas) {
-            flags |= IWX_TX_FLAGS_CMD_RATE;
-            rate_n_flags = htole32(IWX_RATE_MCS_VHT_MSK | IWX_RATE_MCS_CHAN_WIDTH_80 |
-                                    IWX_RATE_MCS_NSS_MSK | IWX_RATE_MCS_ANT_AB_MSK | uint32_t(awdlBaTxFixedMcs));
-            ++awdlBaTxFixedFrames;
-        }
+        !awdlWide80Refused && awdlFixedChannel == 149 && type == IEEE80211_FC0_TYPE_DATA &&
+        txFixedCapable) {
+        flags |= IWX_TX_FLAGS_CMD_RATE;
+        rate_n_flags = htole32(IWX_RATE_MCS_VHT_MSK | IWX_RATE_MCS_CHAN_WIDTH_80 |
+                                IWX_RATE_MCS_NSS_MSK | IWX_RATE_MCS_ANT_AB_MSK | uint32_t(awdlBaTxFixedMcs));
+        ++awdlBaTxFixedFrames;
     }
 
     // HE TX on the coex BA slot queues: when the slot's peer has been sending us HE frames, its data
@@ -13519,37 +13540,33 @@ iwx_tx(struct iwx_softc *sc, mbuf_t m, struct ieee80211_node *ni, int ac, int mo
     // the slot back to rate control on a poor ack ratio.
     if (type == IEEE80211_FC0_TYPE_DATA && awdlCoexOwnWidth == 80) {
         unsigned fxSlot = 0;
-        if (awdlCoexBaSlotQueue(int(qid), &fxSlot) && awdlCoexFixedRateSlot(fxSlot)) {
-            const uint8_t fxCmdVer = iwx_lookup_cmd_ver(sc, IWX_LONG_GROUP, IWX_TX_CMD);
-            const uint8_t fxAntennas = IWX_RATE_MCS_ANT_AB_MSK >> IWX_RATE_MCS_ANT_POS;
-            if (fxCmdVer > 8 && fxCmdVer != IWX_FW_CMD_VER_UNKNOWN &&
-                (iwx_fw_valid_tx_ant(sc) & fxAntennas) == fxAntennas) {
-                flags |= IWX_TX_FLAGS_CMD_RATE;
-                auto &fxS = awdlCoexBaSlots[fxSlot];
-                const bool heFlavour = awdlCoexHeTxWantedSlot(fxSlot);
-                if (!fxS.heStartUS || fxS.heStartFixedHe != heFlavour) {
-                    // First fixed-rate frame of this episode, or the flavour just switched: (re)arm
-                    // the no-completion watchdog marks.
-                    fxS.heStartUS = awdlUptimeUS();
-                    fxS.heStartHeFrames = fxS.heTxFrames;
-                    fxS.heStartNotifs = fxS.txNotifs;
-                    fxS.heStartFixedHe = heFlavour;
-                }
-                ++fxS.heTxFrames;
-                if (heFlavour) {
-                    // 4x LTF with 0.8 us guard: leaving the GI/LTF field at zero means 1x LTF, which is
-                    // not a legal combination for two streams, so the firmware would build no PPDU at all.
-                    rate_n_flags = htole32(IWX_RATE_MCS_HE_MSK | IWX_RATE_MCS_CHAN_WIDTH_80 |
-                                           IWX_RATE_MCS_NSS_MSK | IWX_RATE_MCS_ANT_AB_MSK |
-                                           (uint32_t(IWX_RATE_MCS_HE_SU_4_LTF_08_GI) << IWX_RATE_MCS_HE_GI_LTF_POS) |
-                                           awdlCoexHeTxMcs);
-                } else {
-                    // The default flavour: VHT, 80 MHz, two streams, at the fixed MCS.
-                    rate_n_flags = htole32(IWX_RATE_MCS_VHT_MSK | IWX_RATE_MCS_CHAN_WIDTH_80 |
-                                           IWX_RATE_MCS_NSS_MSK | IWX_RATE_MCS_ANT_AB_MSK |
-                                           awdlCoexVhtFixedMcs);
-                    ++awdlCoexVhtFixedFrames;
-                }
+        bool heFlavour = false;
+        if (awdlCoexBaSlotQueue(int(qid), &fxSlot) &&
+            awdlCoexFixedRateSlot(fxSlot, &heFlavour) && txFixedCapable) {
+            flags |= IWX_TX_FLAGS_CMD_RATE;
+            auto &fxS = awdlCoexBaSlots[fxSlot];
+            if (!fxS.heStartUS || fxS.heStartFixedHe != heFlavour) {
+                // First fixed-rate frame of this episode, or the flavour just switched: (re)arm
+                // the no-completion watchdog marks.
+                fxS.heStartUS = awdlUptimeUS();
+                fxS.heStartHeFrames = fxS.heTxFrames;
+                fxS.heStartNotifs = fxS.txNotifs;
+                fxS.heStartFixedHe = heFlavour;
+            }
+            ++fxS.heTxFrames;
+            if (heFlavour) {
+                // 4x LTF with 0.8 us guard: leaving the GI/LTF field at zero means 1x LTF, which is
+                // not a legal combination for two streams, so the firmware would build no PPDU at all.
+                rate_n_flags = htole32(IWX_RATE_MCS_HE_MSK | IWX_RATE_MCS_CHAN_WIDTH_80 |
+                                       IWX_RATE_MCS_NSS_MSK | IWX_RATE_MCS_ANT_AB_MSK |
+                                       (uint32_t(IWX_RATE_MCS_HE_SU_4_LTF_08_GI) << IWX_RATE_MCS_HE_GI_LTF_POS) |
+                                       awdlCoexHeTxMcs);
+            } else {
+                // The default flavour: VHT, 80 MHz, two streams, at the fixed MCS.
+                rate_n_flags = htole32(IWX_RATE_MCS_VHT_MSK | IWX_RATE_MCS_CHAN_WIDTH_80 |
+                                       IWX_RATE_MCS_NSS_MSK | IWX_RATE_MCS_ANT_AB_MSK |
+                                       awdlCoexVhtFixedMcs);
+                ++awdlCoexVhtFixedFrames;
             }
         }
     }
@@ -13561,17 +13578,12 @@ iwx_tx(struct iwx_softc *sc, mbuf_t m, struct ieee80211_node *ni, int ac, int mo
         awdlTx80PeerUS && awdlTx80PeerGeneration == sc->sc_generation &&
         type == IEEE80211_FC0_TYPE_DATA && !(wh->i_fc[1] & IEEE80211_FC1_RETRY) &&
         mbuf_pkthdr_len(m) >= 1200 && Aw::sameAddress(wh->i_addr1, awdlTx80Peer) &&
-        awdlUptimeUS() - awdlTx80PeerUS < 10000000) {
-        const uint8_t cmdVersion = iwx_lookup_cmd_ver(sc, IWX_LONG_GROUP, IWX_TX_CMD);
-        const uint8_t antennas = IWX_RATE_MCS_ANT_AB_MSK >> IWX_RATE_MCS_ANT_POS;
-        if (cmdVersion > 8 && cmdVersion != IWX_FW_CMD_VER_UNKNOWN &&
-            (iwx_fw_valid_tx_ant(sc) & antennas) == antennas) {
-            flags |= IWX_TX_FLAGS_CMD_RATE;
-            // VHT MCS 4, two streams, 80 MHz, long guard interval.
-            rate_n_flags = htole32(IWX_RATE_MCS_VHT_MSK | IWX_RATE_MCS_CHAN_WIDTH_80 |
-                                    IWX_RATE_MCS_NSS_MSK | IWX_RATE_MCS_ANT_AB_MSK | 4U);
-            requestedWideRate = true;
-        }
+        awdlUptimeUS() - awdlTx80PeerUS < 10000000 && txFixedCapable) {
+        flags |= IWX_TX_FLAGS_CMD_RATE;
+        // VHT MCS 4, two streams, 80 MHz, long guard interval.
+        rate_n_flags = htole32(IWX_RATE_MCS_VHT_MSK | IWX_RATE_MCS_CHAN_WIDTH_80 |
+                                IWX_RATE_MCS_NSS_MSK | IWX_RATE_MCS_ANT_AB_MSK | 4U);
+        requestedWideRate = true;
     }
     
 #if NBPFILTER > 0
