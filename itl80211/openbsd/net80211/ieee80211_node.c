@@ -665,9 +665,17 @@ void
 ieee80211_set_ess(struct ieee80211com *ic, struct ieee80211_ess *ess, 
                   struct ieee80211_node *ni)
 {
-    memset(ic->ic_des_essid, 0, IEEE80211_NWID_LEN);
-    ic->ic_des_esslen = ni->ni_esslen;
-    memcpy(ic->ic_des_essid, ni->ni_essid, ic->ic_des_esslen);
+    /*
+     * With the BSSID pinned (an airportd/WCL join) the name came down from
+     * BLE and ic_des_essid is the only copy of it: a hidden BSS has
+     * ni_esslen == 0, so copying the node's name back over it would erase the
+     * very name the (Re)Association Request has to carry.  Leave it alone.
+     */
+    if (!(ic->ic_flags & IEEE80211_F_DESBSSID)) {
+        memset(ic->ic_des_essid, 0, IEEE80211_NWID_LEN);
+        ic->ic_des_esslen = ni->ni_esslen;
+        memcpy(ic->ic_des_essid, ni->ni_essid, ic->ic_des_esslen);
+    }
     
     ieee80211_disable_wep(ic);
     ieee80211_disable_rsn(ic);
@@ -1087,13 +1095,27 @@ ieee80211_match_bss(struct ieee80211com *ic, struct ieee80211_node *ni,
     rate = ieee80211_fix_rate(ic, ni, IEEE80211_F_DONEGO);
     if (rate & IEEE80211_RATE_BASIC)
         fail |= IEEE80211_NODE_ASSOCFAIL_BASIC_RATE;
-    if (ISSET(ic->ic_flags, IEEE80211_F_AUTO_JOIN) &&
-        ic->ic_des_esslen == 0)
-        fail |= IEEE80211_NODE_ASSOCFAIL_ESSID;
-    if (ic->ic_des_esslen != 0 &&
-        (ni->ni_esslen != ic->ic_des_esslen ||
-         memcmp(ni->ni_essid, ic->ic_des_essid, ic->ic_des_esslen) != 0))
-        fail |= IEEE80211_NODE_ASSOCFAIL_ESSID;
+    /*
+     * A hidden BSS (an iPhone Personal Hotspot started by BLE) never carries
+     * an SSID element: its beacons and probe responses have esslen == 0, so
+     * the name comparison below cannot succeed even though the BSSID pins
+     * exactly which AP we want.  The name of such a join comes from BLE via
+     * airportd and lives in ic_des_essid; it is not something a scan can
+     * confirm.  When the BSSID is pinned and matches, this node *is* the
+     * requested BSS -- skip the name check, or the only joinable candidate is
+     * dropped with ASSOCFAIL_ESSID and the join scan never advances.
+     */
+    const int pinned = (ic->ic_flags & IEEE80211_F_DESBSSID) &&
+        IEEE80211_ADDR_EQ(ic->ic_des_bssid, ni->ni_bssid);
+    if (!pinned) {
+        if (ISSET(ic->ic_flags, IEEE80211_F_AUTO_JOIN) &&
+            ic->ic_des_esslen == 0)
+            fail |= IEEE80211_NODE_ASSOCFAIL_ESSID;
+        if (ic->ic_des_esslen != 0 &&
+            (ni->ni_esslen != ic->ic_des_esslen ||
+             memcmp(ni->ni_essid, ic->ic_des_essid, ic->ic_des_esslen) != 0))
+            fail |= IEEE80211_NODE_ASSOCFAIL_ESSID;
+    }
     if ((ic->ic_flags & IEEE80211_F_DESBSSID) &&
         !IEEE80211_ADDR_EQ(ic->ic_des_bssid, ni->ni_bssid))
         fail |= IEEE80211_NODE_ASSOCFAIL_BSSID;
@@ -1467,6 +1489,15 @@ ieee80211_end_scan(struct _ifnet *ifp)
 #endif
         if (ic->ic_state != IEEE80211_S_RUN) {
             /*
+             * A one-channel join scan (ic_join_chan) can miss the BSS, with
+             * or without hearing other networks; look at that channel once
+             * more before scanning all channels.
+             */
+            if (ic->ic_join_chan_scanned && ic->ic_join_chan_retries < 1) {
+                ic->ic_join_chan_retries++;
+                ic->ic_join_chan = ic->ic_join_chan_scanned;
+            }
+            /*
              * Reset the list of channels to scan and scan the next mode
              * if nothing has been found.
              * If the device scans all bands in one fell swoop, return
@@ -1571,6 +1602,9 @@ ieee80211_end_scan(struct _ifnet *ifp)
     } else if (selbs == NULL)
         goto notfound;
     
+    /* The BSS was found: the next scan is a normal one again. */
+    ic->ic_join_chan_scanned = 0;
+    
     ieee80211_node_join_bss(ic, selbs);
 }
 
@@ -1658,7 +1692,20 @@ ieee80211_get_rate(struct ieee80211com *ic)
 struct ieee80211_node *
 ieee80211_node_alloc(struct ieee80211com *ic)
 {
-    return (struct ieee80211_node *)malloc(sizeof(struct ieee80211_node), 0, 0);
+    struct ieee80211_node *ni =
+        (struct ieee80211_node *)malloc(sizeof(struct ieee80211_node), 0, 0);
+    /*
+     * The OpenBSD original zeroed the node in pool_get(..., PR_ZERO); the
+     * port dropped that.  Everything downstream assumes a zeroed node:
+     * ieee80211_input.c learns an SSID only while ni_essid[0] is '\0' (first
+     * come, first served), so heap garbage in that byte makes the node keep a
+     * wrong name for its whole lifetime, and garbage in ni_esslen makes it
+     * unjoinable.  That is why the same build connects on some boots and not
+     * on others.
+     */
+    if (ni != NULL)
+        memset(ni, 0, sizeof(*ni));
+    return ni;
 }
 
 void

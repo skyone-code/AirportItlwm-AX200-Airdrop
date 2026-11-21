@@ -431,11 +431,25 @@ inline bool probeChannel(bool active, bool passiveOnly, bool dfs) {
     return active && !passiveOnly && !dfs;
 }
 
+// With LAR the NVM profile marks every 5 GHz channel passive (MCC "00"), while
+// the firmware enforces no-IR itself (passive dwell until it hears a beacon), as
+// Linux iwlwifi and OpenBSD iwx rely on.  A directed scan may therefore ask it to
+// probe those channels: any WCL scan carrying an SSID (also while associated),
+// and net80211's join scan, but not its background roaming scans.  The NVM map
+// flags no channel DFS on this card, so the 5 GHz DFS range (52-144) stays
+// passive here explicitly -- a hidden hotspot there needs the passive dwell.
+inline bool probePassiveChannel(bool larEnabled, bool wclScan, bool bgscan,
+                                bool directed, bool is5GHz, unsigned channel) {
+    return larEnabled && directed && (wclScan || !bgscan) && is5GHz &&
+        !(channel >= 52 && channel <= 144);
+}
+
 struct ScanRequest {
     uint32_t identifier;
     uint32_t type;
     uint8_t ssid[32];
     uint32_t ssidLength;
+    uint32_t ssidOffset;    // Where decodeScan found the SSID (diagnostics; 0 = unknown).
     uint8_t bssid[6];
     uint32_t channelCount;
     uint8_t channels[32];
@@ -443,6 +457,77 @@ struct ScanRequest {
 
 inline bool scanChannelSelected(const uint8_t *channels, bool restricted, unsigned channel) {
     return !restricted || (channel < 256 && (channels[channel / 8] & (1U << (channel % 8))));
+}
+
+/*
+ * SCAN_REQ as IO80211.framework's Apple80211Scan builds it when the card
+ * reports capability 73 (macOS 26, 0x1598 bytes). The head matches
+ * apple80211_scan_data: ssid_len 0x10, ssid 0x14, scan_type 0x34,
+ * num_channels 0x44, apple80211_channel entries from 0x48 (room for 400).
+ * The SSID list follows: count at 0x1314, up to 10 entries of 0x38 bytes from
+ * 0x1318 (version, ssid_len, ssid). Only the first SSID is used: the HAL
+ * probes for one.
+ */
+inline void decodeLegacyScan(const void *buffer, ScanRequest &out) {
+    const uint8_t *p = static_cast<const uint8_t *>(buffer);
+    out = {};
+    out.type = read32(p + 0x34);
+    if (out.type < 1 || out.type > 4)
+        out.type = 1;
+    uint32_t ssidLength = read32(p + 0x10);
+    const uint8_t *ssid = p + 0x14;
+    uint32_t listCount = read32(p + 0x1314);
+    if ((!ssidLength || ssidLength > 32) && listCount && listCount <= 10) {
+        ssidLength = read32(p + 0x1318 + 4);
+        ssid = p + 0x1318 + 8;
+        out.ssidOffset = 0x1318 + 8;
+    } else if (ssidLength && ssidLength <= 32) {
+        out.ssidOffset = 0x14;
+    }
+    if (ssidLength && ssidLength <= 32) {
+        out.ssidLength = ssidLength;
+        memcpy(out.ssid, ssid, ssidLength);
+    }
+    uint32_t count = read32(p + 0x44);
+    if (count > 400)
+        count = 0;
+    for (uint32_t i = 0; i < count; ++i) {
+        const uint8_t *entry = p + 0x48 + size_t(i) * 12;
+        uint32_t channel = read32(entry + 4), flags = read32(entry + 8);
+        if (!channel || channel > 196 || (flags & 0x2000))
+            continue;
+        if (((flags & 0x8) && channel > 14) || ((flags & 0x10) && channel <= 14))
+            continue;
+        out.channels[channel / 8] |= 1U << (channel % 8);
+        out.channelCount++;
+    }
+}
+
+/*
+ * Directed scans that IO80211ScanManager builds from SCAN_REQ (Apple80211Scan,
+ * e.g. airportd's Instant Hotspot join) can carry their SSID only in the list
+ * after the channel table (0x1318..0x1550), not in the single field at 0x1c.
+ * Take the first entry there: a 32-bit length (2..32), then that many
+ * printable or UTF-8 bytes, then zero padding to 32 bytes. Only active and fast
+ * scans (the driver probes for both) restricted to 1-4 channels are searched
+ * (the hotspot join scans one), so broadcast scans keep their wildcard probes.
+ */
+inline void findListSSID(const uint8_t *p, ScanRequest &out) {
+    for (size_t off = 0x1318; off + 4 + 32 <= 0x1550; off += 4) {
+        uint32_t len = read32(p + off);
+        if (len < 2 || len > 32)
+            continue;
+        const uint8_t *ssid = p + off + 4;
+        bool ok = true;
+        for (uint32_t k = 0; k < 32 && ok; ++k)
+            ok = k < len ? (ssid[k] >= 0x20 && ssid[k] != 0x7f) : ssid[k] == 0;
+        if (!ok)
+            continue;
+        out.ssidLength = len;
+        out.ssidOffset = uint32_t(off + 4);
+        memcpy(out.ssid, ssid, len);
+        return;
+    }
 }
 
 inline bool decodeScan(const void *buffer, size_t length, ScanRequest &out) {
@@ -460,6 +545,11 @@ inline bool decodeScan(const void *buffer, size_t length, ScanRequest &out) {
     out.ssidLength = ssidLength;
     out.channelCount = count;
     memcpy(out.ssid, p + 0x20, ssidLength);
+    if (ssidLength)
+        out.ssidOffset = 0x20;
+    else if (length >= 0x1550 && (type == 1 || type == 3) && count >= 1 && count <= 4)
+        // ACTIVE/FAST: airportd's Instant Hotspot join keeps its SSID only in the list.
+        findListSSID(p, out);
     memcpy(out.bssid, p + 0x14, 6);
     // Native entries are apple80211_channel: version, channel, flags (12 bytes).
     for (uint32_t i = 0; i < count; ++i) {

@@ -435,6 +435,9 @@ private:
     void updateWCLLinkQuality(bool = false);
     static void wclJoinTimeout(OSObject *, IOTimerEventSource *);
     IOReturn beginWCLScan(apple80211ScanRequest *);
+    IOReturn startWCLScan(AirportWCL::ScanRequest &);
+    IOReturn beginLegacyScan(const void *);
+    void finishLegacyScan();
     void clearWCLPMKSA();
     IOReturn installWCLKey(apple80211_key *);
     IOReturn accessWCLRSN(apple80211_rsn_ie_data *, bool);
@@ -451,6 +454,10 @@ private:
     bool scanPending;
     bool scanCompleted;
     bool scanSkipCompletion;
+    // A legacy SCAN_REQ waiting for the scan-done event Apple80211Scan watches for.
+    bool legacyScanPending = false;
+    bool legacyScanOnly = false;      // The running scan answers a legacy request only.
+    bool legacyScanStarting = false;  // Started inside the ioctl; answer once it returns.
     bool wclBssValid;
     bool wclLinkIndicated;
     uint8_t wclBssInfo[sizeof(AirportWCL::BeaconMetadata) + 0x800];

@@ -452,6 +452,21 @@ struct ieee80211com {
     uint64_t ic_wcl_tx_packets[4];
     uint64_t ic_wcl_rx_packets[4];
 #endif
+    /*
+     * Channel of the BSS a join request named (0 = unknown).  The next scan
+     * covers only this channel; it is cleared when that scan is started.
+     * A full sweep takes nearly the system's ~4 s association timeout, and the
+     * node table is often empty at join time (e.g. after the firmware restart
+     * that applies a new MAC address).
+     */
+    uint8_t ic_join_chan;
+    /*
+     * Channel of the scan that just ran as such a one-channel join scan
+     * (0 = the last scan wasn't one), and how often it was repeated because
+     * the BSS wasn't found: one look can miss it.
+     */
+    uint8_t ic_join_chan_scanned;
+    uint8_t ic_join_chan_retries;
     void            (*ic_event_handler)(struct ieee80211com *, int, void *);
 	CTimeout*		ic_bgscan_timeout;
 	uint32_t		ic_bgscan_fail;
@@ -744,5 +759,12 @@ struct ieee80211_ess *ieee80211_get_ess(struct ieee80211com *, const char *, int
 void ieee80211_begin_cache_bgscan(struct _ifnet *);
 
 extern	int ieee80211_cache_size;
+
+/*
+ * Instant Hotspot Apple device IE in (Re)Association Requests.
+ * -1 = do not send, 0..255 = flags byte of TLV 1.  Set from the driver's
+ * -itlnoihsie boot argument; the definition lives in ieee80211_output.c.
+ */
+extern	int itlwm_ihs_ie;
 
 #endif /* _NET80211_IEEE80211_VAR_H_ */

@@ -6833,9 +6833,18 @@ static bool awdlCoexPeerKnown(const uint8_t *addr, uint64_t nowUS, bool refresh 
     }
     return false;
 }
+// Management queue number: how often the firmware refused the slot we asked for, and of those, how often
+// taking the number it answered with still failed. Zero fallbacks means the firmware agreed every time.
+static uint32_t mgmtQidFallbacks, mgmtQidFallbackFails;
+// Directed scans allowed to probe LAR-passive 5 GHz channels: one per channel entry per scan, so a join
+// that found the hotspot on 5 GHz shows up here. Stays 0 on 2.4 GHz-only hardware and when -itlno5gprobe.
+static uint32_t probePassive5GChans;
 static void awdlCoexPublish()
 {
     auto *root = IORegistryEntry::getRegistryRoot();
+    root->setProperty("ItlwmMgmtQidFallbacks", mgmtQidFallbacks, 32);
+    root->setProperty("ItlwmMgmtQidFallbackFails", mgmtQidFallbackFails, 32);
+    root->setProperty("ItlwmProbePassive5G", probePassive5GChans, 32);
     root->setProperty("AwCoexAdded", awdlCoexAdded);
     root->setProperty("AwCoexAdds", awdlCoexAdds, 32);
     root->setProperty("AwCoexRemoves", awdlCoexRemoves, 32);
@@ -7379,6 +7388,12 @@ static Aw::ObservedCounts awdlSeen;
 static bool mccProbe;
 static CTimeout *mccProbeTimer;
 static bool mccProbeNoticePending;
+// The management queue takes the number the firmware answers with when it refuses the one we asked
+// for. -itlmqnoqid2 restores the upstream behaviour of failing the state change instead.
+static bool mgmtQidFallback = true;
+// A directed scan may probe the LAR-passive 5 GHz channels, which is the only way a hidden Personal
+// Hotspot is ever seen on 5 GHz. -itlno5gprobe restores the strict no-IR behaviour.
+static bool probePassive5G = true;
 // AWDL on channel 149: the firmware's own country notice, answered at startup.
 static bool awdlCountryDiscovery, awdlCountryScanDone, awdlCountryNoticeSeen, awdlCountryAnswerPending;
 static uint16_t awdlCountryNotice, awdlCountryLastAnswered;
@@ -14271,7 +14286,13 @@ iwx_umac_scan_fill_channels(struct iwx_softc *sc,
     struct ieee80211com *ic = &sc->sc_ic;
     struct ieee80211_channel *c;
     uint8_t nchan;
+    /* A join request asked for one scan of its BSS channel only.  Never let a
+     * stale value trim a scan that nothing asked to restrict: the request flag
+     * is what makes the channel current. */
+    uint8_t join_chan = (bgscan || !ic->ic_wcl_join_requested) ? 0 : ic->ic_join_chan;
     
+    if (!bgscan)
+        ic->ic_join_chan = 0;
     for (nchan = 0, c = &ic->ic_channels[1];
          c <= &ic->ic_channels[IEEE80211_CHAN_MAX] &&
          nchan < sc->sc_capa_n_scan_channels;
@@ -14279,6 +14300,8 @@ iwx_umac_scan_fill_channels(struct iwx_softc *sc,
         uint8_t channel_num;
         
         if (c->ic_flags == 0)
+            continue;
+        if (join_chan && ieee80211_chan2ieee(ic, c) != join_chan)
             continue;
 #ifdef AIRPORT_WCL
         if (!AirportWCL::scanChannelSelected(ic->ic_wcl_scan_channels,
@@ -14304,8 +14327,28 @@ iwx_umac_scan_fill_channels(struct iwx_softc *sc,
         }
         
 #ifdef AIRPORT_WCL
-        if (AirportWCL::probeChannel(n_ssids != 0,
-                c->ic_flags & IEEE80211_CHAN_PASSIVE, c->ic_flags & IEEE80211_CHAN_DFS))
+        bool passive = (c->ic_flags & IEEE80211_CHAN_PASSIVE) != 0;
+        /*
+         * A hidden SSID (an iPhone Personal Hotspot) answers only directed
+         * probes, and net80211 learns a hidden BSS only from its probe
+         * response.  With LAR the NVM profile marks every 5 GHz channel
+         * passive, so without this the hotspot is invisible on 5 GHz no matter
+         * what the join asked for.  Directed scans are allowed to probe those
+         * channels; see AirportWCL::probePassiveChannel for the boundaries.
+         */
+        if (passive && probePassive5G && AirportWCL::probePassiveChannel(sc->sc_nvm.lar_enabled,
+                ic->ic_wcl_scan_requested, bgscan != 0,
+                (ic->ic_wcl_scan_requested ? ic->ic_wcl_scan_ssid_length :
+                 ic->ic_des_esslen) != 0,
+                IEEE80211_IS_CHAN_5GHZ(c) != 0, channel_num)) {
+            passive = false;
+            ++probePassive5GChans;
+            if (join_chan && channel_num == join_chan)
+                XYLog("%s: join scan probes LAR-passive channel %u\n",
+                      DEVNAME(sc), channel_num);
+        }
+        if (AirportWCL::probeChannel(n_ssids != 0, passive,
+                (c->ic_flags & IEEE80211_CHAN_DFS) != 0))
 #else
         if (n_ssids != 0 && !bgscan)
 #endif
@@ -14313,6 +14356,9 @@ iwx_umac_scan_fill_channels(struct iwx_softc *sc,
         chan++;
         nchan++;
     }
+    /* Remember what this scan covered, so a miss can be retried once. */
+    if (!bgscan)
+        ic->ic_join_chan_scanned = join_chan;
     
     return nchan;
 }
@@ -15808,6 +15854,27 @@ iwx_enable_mgmt_queue(struct iwx_softc *sc)
     err = iwx_enable_txq(sc, IWX_STATION_ID,
                          sc->first_data_qid, IWX_MGMT_TID,
                          sc->txq[sc->first_data_qid].ring_count);
+    if (err && mgmtQidFallback && sc->first_data_qid != IWX_QID_MGMT) {
+        // The firmware owns the queue numbers and answers with the one it actually holds, which
+        // iwx_enable_txq refuses with EIO so a completion can never land on the wrong host ring. The
+        // AUX slot is only ours for as long as the firmware says so: after a firmware restart a
+        // request for 1 comes back as 2 (measured), and then this state change fails, no management
+        // queue exists, no auth frame leaves, and the join dies in AUTH before it starts -- on every
+        // attempt until the next reboot. Ask for the number it offered instead. Both rings come from
+        // iwx_alloc_tx_ring, so txq[IWX_QID_MGMT] is a real ring, and the firmware's queue keeps the
+        // same number that every completion path already indexes txq[] with.
+        const int altErr = iwx_enable_txq(sc, IWX_STATION_ID, IWX_QID_MGMT, IWX_MGMT_TID,
+                                          sc->txq[IWX_QID_MGMT].ring_count);
+        ++mgmtQidFallbacks;
+        if (altErr != 0)
+            ++mgmtQidFallbackFails;
+        XYLog("%s: MGMT Tx queue fell back: asked %d, asked again %d, error %d\n",
+              DEVNAME(sc), sc->first_data_qid, IWX_QID_MGMT, altErr);
+        if (altErr == 0) {
+            sc->first_data_qid = IWX_QID_MGMT;
+            err = 0;
+        }
+    }
     if (err) {
         XYLog("%s: could not enable MGMT Tx queue %d (error %d)\n",
               DEVNAME(sc), sc->first_data_qid, err);
@@ -22120,6 +22187,12 @@ iwx_attach(struct iwx_softc *sc, struct pci_attach_args *pa)
     {
         int dummy;
         mccProbe = PE_parse_boot_argn("-itlmccprobe", &dummy, sizeof(dummy));
+        mgmtQidFallback = !PE_parse_boot_argn("-itlmqnoqid2", &dummy, sizeof(dummy));
+        // Instant Hotspot Apple IE in (Re)Association Requests (default on).
+        // An iPhone Personal Hotspot accepts the association but withholds
+        // EAPOL message 1 unless this vendor IE is present.
+        itlwm_ihs_ie = PE_parse_boot_argn("-itlnoihsie", &dummy, sizeof(dummy)) ? -1 : 1;
+        probePassive5G = !PE_parse_boot_argn("-itlno5gprobe", &dummy, sizeof(dummy));
         if (mccProbe)
             timeout_set(&mccProbeTimer, mccProbeTimeout, sc);
         // The AWDL coex stack is on by default (2026-11-15): each stage used to need its own

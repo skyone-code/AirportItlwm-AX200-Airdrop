@@ -98,6 +98,7 @@ void AirportItlwmSkywalkInterface::stopWCL()
     if (scanSource)
         scanSource->cancelTimeout();
     scanPending = joinPending = false;
+    legacyScanPending = legacyScanOnly = legacyScanStarting = false;
     joinDeferred = false;
     explicit_bzero(&deferredJoin, sizeof(deferredJoin));
     if (fHalService) {
@@ -239,6 +240,20 @@ IOReturn AirportItlwmSkywalkInterface::beginWCLScan(apple80211ScanRequest *reque
     AirportWCL::ScanRequest scan;
     if (!AirportWCL::decodeScan(request, 0x1550, scan))
         return kIOReturnBadArgument;
+    {
+        // IOLog, not XYLog: kprintf output never reaches `log show`.
+        char ssid[33] = {};
+        if (scan.ssidLength)
+            memcpy(ssid, scan.ssid, scan.ssidLength);
+        IOLog("AirportItlwm: WCL scan id=%u type=%u ssid_len=%u@0x%x ssid=%s channels=%u\n",
+              scan.identifier, scan.type, scan.ssidLength, scan.ssidOffset, ssid,
+              scan.channelCount);
+    }
+    return startWCLScan(scan);
+}
+
+IOReturn AirportItlwmSkywalkInterface::startWCLScan(AirportWCL::ScanRequest &scan)
+{
     ieee80211com *ic = fHalService->get80211Controller();
     if (!(ic->ic_if.if_flags & IFF_RUNNING))
         return kIOReturnNotReady;
@@ -270,10 +285,10 @@ IOReturn AirportItlwmSkywalkInterface::beginWCLScan(apple80211ScanRequest *reque
     if (ic->ic_state == IEEE80211_S_RUN) {
         ieee80211_begin_cache_bgscan(&ic->ic_if);
         if (!(ic->ic_flags & IEEE80211_F_BGSCAN)) {
-            scanPending = false;
-            ic->ic_wcl_scan_requested = false;
-            scanSource->cancelTimeout();
-            return kIOReturnBusy;
+            // Report success rather than failing: an error makes userland keep
+            // its stale list. The caller re-reads the node cache we already have.
+            finishWCLScan(kIOReturnSuccess);
+            return kIOReturnSuccess;
         }
     } else if (ic->ic_state != IEEE80211_S_SCAN) {
         int error = ic->ic_newstate(ic, IEEE80211_S_SCAN, -1);
@@ -291,17 +306,85 @@ void AirportItlwmSkywalkInterface::finishWCLScan(IOReturn status)
 {
     if (!scanPending)
         return;
+    // A scan started on behalf of a legacy SCAN_REQ answers that ioctl, not the WCL client.
+    bool notifyWCL = !legacyScanOnly;
+    legacyScanOnly = false;
     scanPending = false;
     scanCompleted = false;
     scanSource->cancelTimeout();
     fHalService->get80211Controller()->ic_wcl_scan_requested = false;
-    instance->postMessage(this, AirportWCL::ScanDone, &status, sizeof(status), true);
+    if (notifyWCL)
+        instance->postMessage(this, AirportWCL::ScanDone, &status, sizeof(status), true);
+    if (legacyScanPending) {
+        if (legacyScanStarting) {
+            /* Still inside the SCAN_REQ ioctl: answer once Apple80211Scan waits. */
+            scanSource->setTimeoutMS(100);
+            scanSource->enable();
+        } else
+            finishLegacyScan();
+    }
 }
 
 void AirportItlwmSkywalkInterface::completeWCLScan()
 {
-    if (!wclStopping)
-        finishWCLScan(scanCompleted ? kIOReturnSuccess : kIOReturnTimeout);
+    if (wclStopping)
+        return;
+    if (!scanPending) {
+        // A legacy request answered from the node cache (no scan was started).
+        if (legacyScanPending)
+            finishLegacyScan();
+        return;
+    }
+    finishWCLScan(scanCompleted ? kIOReturnSuccess : kIOReturnTimeout);
+}
+
+/*
+ * SCAN_REQ from IO80211.framework's Apple80211Scan (airportd's Instant Hotspot
+ * join, among others): run it as a WCL scan, directed at its SSID on its
+ * channels, then answer with the legacy scan-done event Apple80211Scan waits
+ * for. Fast scans, or requests that cannot start a scan, are answered from the
+ * node cache after 100 ms.
+ */
+IOReturn AirportItlwmSkywalkInterface::beginLegacyScan(const void *request)
+{
+    AirportWCL::ScanRequest scan;
+    AirportWCL::decodeLegacyScan(request, scan);
+    {
+        char ssid[33] = {};
+        if (scan.ssidLength)
+            memcpy(ssid, scan.ssid, scan.ssidLength);
+        IOLog("AirportItlwm: legacy scan type=%u ssid_len=%u@0x%x ssid=%s channels=%u wcl_pending=%d legacy_pending=%d\n",
+              scan.type, scan.ssidLength, scan.ssidOffset, ssid, scan.channelCount,
+              scanPending ? 1 : 0, legacyScanPending ? 1 : 0);
+    }
+    if (wclStopping)
+        return kIOReturnNotReady;
+    if (legacyScanPending)
+        return kIOReturnSuccess;    // The pending answer covers this request too.
+    legacyScanPending = true;
+    if (scanPending)
+        return kIOReturnSuccess;    // The end of the scan in progress answers it.
+    if (scan.type != APPLE80211_SCAN_TYPE_FAST) {
+        legacyScanOnly = true;
+        legacyScanStarting = true;
+        IOReturn ret = startWCLScan(scan);
+        legacyScanStarting = false;
+        if (ret == kIOReturnSuccess)
+            return kIOReturnSuccess;
+        legacyScanOnly = false;
+        IOLog("AirportItlwm: legacy scan not started (0x%x), answering from the cache\n", ret);
+    }
+    // Answer after 100 ms, once Apple80211Scan is waiting for the event.
+    scanSource->setTimeoutMS(100);
+    scanSource->enable();
+    return kIOReturnSuccess;
+}
+
+void AirportItlwmSkywalkInterface::finishLegacyScan()
+{
+    legacyScanPending = false;
+    UInt32 msg = 0;
+    instance->postMessage(this, APPLE80211_M_SCAN_DONE, &msg, sizeof(msg), true);
 }
 
 void AirportItlwmSkywalkInterface::publishWCLBeacon(const ieee80211_node *node, const uint8_t *ies, size_t length)
@@ -517,6 +600,18 @@ IOReturn AirportItlwmSkywalkInterface::startWCLJoin(AirportWCL::JoinRequest &joi
     ic->ic_wcl_scan_requested = false;
     current_authtype_lower = join.lowerAuth;
     current_authtype_upper = join.upperAuth;
+    /*
+     * The join request names the BSS channel (chanspec, channel number in the
+     * low byte). The node table is often empty here (e.g. after the firmware
+     * restart that applies a new MAC address), and a full sweep takes nearly
+     * the system's ~4 s association timeout; scan only this channel first.
+     */
+    {
+        unsigned channel = join.channelSpec & 0xff;
+        ic->ic_join_chan = (channel > 0 && channel <= IEEE80211_CHAN_MAX &&
+                            ic->ic_channels[channel].ic_flags) ? channel : 0;
+        ic->ic_join_chan_retries = 0;
+    }
     explicit_bzero(&join, sizeof(join));
     wclBssValid = false;
     joinPending = true;

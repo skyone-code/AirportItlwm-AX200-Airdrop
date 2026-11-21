@@ -1511,6 +1511,20 @@ ieee80211_get_deauth(struct ieee80211com *ic, struct ieee80211_node *ni,
 	return m;
 }
 
+/*
+ * Instant Hotspot Apple device IE, as built by IO80211Family's
+ * IO80211_GetInstantHotSpotIE and
+ * AppleBCMWLANJoinAdapter::addInstantHSAppleDeviceIE:
+ * OUI 00:17:f2, type 0x0b, version 0, TLV 1 (len 4) = flags byte + 3 zero bytes.
+ *
+ * An iPhone that hosts a Personal Hotspot hands the SSID/PSK to the Mac over
+ * BLE and expects this IE in the (Re)Association Request; without it the
+ * association succeeds but the iPhone never sends EAPOL message 1, so the port
+ * never gets authorised.  Default on (matches AppleBCMWLAN, which always adds
+ * it); -itlnoihsie turns it off for A/B testing.
+ */
+int itlwm_ihs_ie = 1;
+
 /*-
  * (Re)Association request frame format:
  * [2]   Capability information
@@ -1534,12 +1548,26 @@ ieee80211_get_assoc_req(struct ieee80211com *ic, struct ieee80211_node *ni,
 	/* VHT is only defined for 5 GHz; do not advertise it on 2.4 GHz. */
 	int vht_on = (ic->ic_flags & IEEE80211_F_VHTON) &&
 	    !IEEE80211_IS_CHAN_2GHZ(ni->ni_chan);
+	int ihs = itlwm_ihs_ie;
+	u_int16_t ihs_len = (ihs >= 0 && ihs <= 0xff) ? 13 : 0;
+	/*
+	 * SSID for the request.  With the BSSID pinned the name is the one
+	 * airportd handed down (from BLE for a hidden hotspot), and the node may
+	 * carry no name at all -- a hidden BSS has esslen == 0.  Prefer the
+	 * pinned name; for an ordinary join the two are identical.
+	 */
+	const u_int8_t *essid = ni->ni_essid;
+	u_int esslen = ni->ni_esslen;
+	if ((ic->ic_flags & IEEE80211_F_DESBSSID) && ic->ic_des_esslen != 0) {
+		essid = ic->ic_des_essid;
+		esslen = ic->ic_des_esslen;
+	}
 
 	m = ieee80211_getmgmt(MBUF_DONTWAIT, MT_DATA,
 	    2 + 2 +
 	    ((type == IEEE80211_FC0_SUBTYPE_REASSOC_REQ) ?
 		IEEE80211_ADDR_LEN : 0) +
-	    2 + ni->ni_esslen +
+	    2 + esslen +
 	    2 + min(rs->rs_nrates, IEEE80211_RATE_SIZE) +
 	    ((rs->rs_nrates > IEEE80211_RATE_SIZE) ?
 		2 + rs->rs_nrates - IEEE80211_RATE_SIZE : 0) +
@@ -1552,7 +1580,8 @@ ieee80211_get_assoc_req(struct ieee80211com *ic, struct ieee80211_node *ni,
 		2 + IEEE80211_WPAIE_MAXLEN : 0) +
 	    ((ic->ic_flags & IEEE80211_F_HTON) ? sizeof(struct ieee80211_ie_htcap) + sizeof(struct ieee80211_wme_info) : 0) +
         (vht_on ? sizeof(struct ieee80211_ie_vhtcap) + 2 : 0) +
-        ((ic->ic_flags & IEEE80211_F_HEON) ? (sizeof(struct ieee80211_he_cap_elem) + 2 + 1 + sizeof(struct ieee80211_he_mcs_nss_supp) + IEEE80211_HE_PPE_THRES_MAX_LEN) : 0));
+        ((ic->ic_flags & IEEE80211_F_HEON) ? (sizeof(struct ieee80211_he_cap_elem) + 2 + 1 + sizeof(struct ieee80211_he_mcs_nss_supp) + IEEE80211_HE_PPE_THRES_MAX_LEN) : 0) +
+	    ihs_len);
 	if (m == NULL)
 		return NULL;
 
@@ -1571,7 +1600,7 @@ ieee80211_get_assoc_req(struct ieee80211com *ic, struct ieee80211_node *ni,
 		IEEE80211_ADDR_COPY(frm, ic->ic_bss->ni_bssid);
 		frm += IEEE80211_ADDR_LEN;
 	}
-	frm = ieee80211_add_ssid(frm, ni->ni_essid, ni->ni_esslen);
+	frm = ieee80211_add_ssid(frm, essid, esslen);
 	frm = ieee80211_add_rates(frm, rs);
 	if (rs->rs_nrates > IEEE80211_RATE_SIZE)
 		frm = ieee80211_add_xrates(frm, rs);
@@ -1611,9 +1640,37 @@ ieee80211_get_assoc_req(struct ieee80211com *ic, struct ieee80211_node *ni,
     if (ni->ni_he_requested)
         frm = ieee80211_add_hecaps(frm, ic);
 
+    /*
+     * Instant Hotspot Apple device IE.  Must come last: it is appended after
+     * every standard IE, exactly where AppleBCMWLANJoinAdapter puts it.
+     * 13 bytes: EID 221, len 11, OUI 00:17:f2, type 0x0b, version 0,
+     * TLV 1 (len 4) = flags + 0x00 0x00 0x00.
+     */
+    if (ihs_len != 0) {
+        static const u_int8_t ihsie[9] = {
+            IEEE80211_ELEMID_VENDOR, 11, 0x00, 0x17, 0xf2, 0x0b, 0x00, 0x01, 0x04
+        };
+        memcpy(frm, ihsie, sizeof(ihsie));
+        frm += sizeof(ihsie);
+        *frm++ = (u_int8_t)ihs;
+        *frm++ = 0;
+        *frm++ = 0;
+        *frm++ = 0;
+    }
+
     size_t l = frm - mtod(m, u_int8_t *);
     mbuf_pkthdr_setlen(m, l);
     mbuf_setlen(m, l);
+
+    /*
+     * One line per (Re)Association Request.  ssid= is the name actually put on
+     * the air and ihs= is the Instant Hotspot IE flags byte (-1 = not sent);
+     * both decide whether an iPhone hotspot answers the join.
+     */
+    XYLog("%s: assoc_req ssid=", __FUNCTION__);
+    ieee80211_print_essid(essid, esslen);
+    XYLog(" len=%zu pinned=%d ihs=%d\n", l,
+          !!(ic->ic_flags & IEEE80211_F_DESBSSID), ihs_len ? ihs : -1);
 
 #if defined(AIRPORT_WCL) && defined(DEBUG)
     XYLog("%s capinfo=0x%04x listen=%d rates=%d ht=%d wmm=%d vht=%d he=%d len=%zu\n",

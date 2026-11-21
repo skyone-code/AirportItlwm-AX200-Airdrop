@@ -1075,6 +1075,17 @@ getLINK_CHANGED_EVENT_DATA(struct apple80211_link_changed_event_data *ed)
 IOReturn AirportItlwmSkywalkInterface::
 setSCAN_REQ(struct apple80211_scan_data *sd)
 {
+#if defined(AIRPORT_WCL)
+    /*
+     * Run it as a WCL scan directed at its SSID on its channels, then answer
+     * with the legacy scan-done event Apple80211Scan waits for. The old path
+     * ran an undirected background scan, so a hidden hotspot (whose SSID only
+     * this request carries) was never probed.
+     */
+    if (!sd || fScanResultWrapping)
+        return 22;
+    return beginLegacyScan(sd);
+#else
     struct ieee80211com *ic = fHalService->get80211Controller();
 #if 0
     XYLog("%s Type: %u BSS Type: %u PHY Mode: %u Dwell time: %u Rest time: %u Num channels: %u SSID: %s BSSID: %s\n",
@@ -1110,6 +1121,7 @@ setSCAN_REQ(struct apple80211_scan_data *sd)
         scanSource->enable();
     }
     return kIOReturnSuccess;
+#endif
 }
 
 extern OSDictionary *convertScanToDictionary(apple80211_scan_result *a1);
