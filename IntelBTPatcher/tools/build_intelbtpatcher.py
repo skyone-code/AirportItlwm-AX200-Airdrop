@@ -9,7 +9,7 @@ ROOT=Path(__file__).resolve().parents[1]
 # Bundle version stays three-segment: the kernel's parser rejects a fourth numeric field outright
 # (kmutil silently ignores the bundle), so in-flight iterations are tagged in IntelBTPatcher.cpp
 # (IbtpBuild) and in the archive name; a finalized build bumps this to 2.4.3.
-NAME='IntelBTPatcher';VERSION='2.4.6';IDENT='com.zxystd.IntelBTPatcher'
+NAME='IntelBTPatcher';VERSION='2.4.7';IDENT='com.zxystd.IntelBTPatcher'
 def run(c): subprocess.run([str(x) for x in c],check=True)
 def main():
     p=argparse.ArgumentParser();p.add_argument('--out',type=Path,required=True)
