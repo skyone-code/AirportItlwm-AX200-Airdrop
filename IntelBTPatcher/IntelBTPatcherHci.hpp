@@ -12,6 +12,8 @@ namespace Ibtp {
 // bluetoothd only uses that form at all on BT 5 controllers.
 enum : uint16_t {
     OpReset = 0x0c03,
+    OpReadClassOfDevice = 0x0c23,        // Read Class of Device
+    OpWriteClassOfDevice = 0x0c24,       // Write Class of Device
     OpLeEventMask = 0x2001,
     OpLeReadLocalFeatures = 0x2003,
     OpLeOwnRandomAddr = 0x2005,          // LE Set Random Address: the controller's own address
@@ -199,6 +201,39 @@ inline uint32_t fingerprintOf(uint16_t op) {
 // original is never loaded beside it. The address must never end up as an advertising address -
 // that would make the Mac trackable.
 static const uint8_t kLegacySeedAddress[6] = {0x94, 0x50, 0x64, 0xd0, 0x78, 0x6b};
+
+// ---- class of device -------------------------------------------------------------------
+// 0x0A010C = major Computer (0x01), minor Laptop (0x03 / 0x0C), service bits 0x0A0 (Object
+// Transfer, Audio, Information). Three bytes little-endian, which is what the command carries.
+//
+// bluetoothd on this machine never writes it: FoundBluetoothInterfaces() finds a USB dongle
+// (idVendor 0x8087) and sets gUseInternalController = FALSE, so the whole internal-controller
+// bring-up is skipped and the controller keeps the class it booted with - zero on this AX200.
+// Zero (or, worse, the MOBILE_PHONE class bluetoothd copies in from a peer) is what makes an
+// iPhone refuse to treat the Mac as a Mac, which is the gate in front of MagicPairing.
+static const uint8_t kLaptopClassOfDevice[3] = {0x0c, 0x01, 0x0a};
+static constexpr size_t kClassOfDeviceCommandLength = 6;   // opcode + plen + 3 data bytes
+
+// The command an unmodified host would send, to seed the class right after a reset.
+inline void makeClassOfDeviceCommand(uint8_t *out) {
+    out[0] = uint8_t(OpWriteClassOfDevice & 0xff);
+    out[1] = uint8_t(OpWriteClassOfDevice >> 8);
+    out[2] = 3;
+    memcpy(out + 3, kLaptopClassOfDevice, 3);
+}
+
+// A host that does write a class has to be held to the laptop class: bluetoothd picks the value
+// from the last peer it saw, so a phone or a headset connection rewrites it. Returns true when
+// the bytes were changed and therefore have to be written back to the caller's buffer.
+inline bool rewriteClassOfDevice(uint8_t *hci, size_t length) {
+    if (length < kClassOfDeviceCommandLength || opcodeOf(hci) != OpWriteClassOfDevice)
+        return false;
+    if (memcmp(hci + 3, kLaptopClassOfDevice, 3) == 0)
+        return false;
+    memcpy(hci + 3, kLaptopClassOfDevice, 3);
+    return true;
+}
+
 
 // ---- the host's state as far as this kext can see it -----------------------------------
 // ownAddress is the fallback for every set: bluetoothd's LE random address, or the last address

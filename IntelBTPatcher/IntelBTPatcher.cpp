@@ -38,6 +38,11 @@ static bool privacyOn {};
 // default because it is the only thing standing between the host and a create that cannot match:
 // the accept list holds a phone's identity address while the air carries its rotating one.
 static bool rpaOn {true};
+// -ibtpnocodseed turns off the class-of-device injection. On by default because on this machine
+// nothing else ever writes one: FoundBluetoothInterfaces() sees a USB dongle and sets
+// gUseInternalController = FALSE, so the internal bring-up - which is where a Mac's laptop class
+// comes from - is skipped entirely. A reset clears the class, so the injection follows every reset.
+static bool codSeedOn {true};
 // Thirty seconds, not the five first assumed: a resolvable private address rotates on the order of
 // fifteen minutes, so an address heard half a minute ago is still the one on the air, while creates
 // often land many seconds after the last sighting (bluetoothd hears the phone roughly once every
@@ -104,6 +109,9 @@ static mach_vm_address_t pipeIoOrig {};
 static mach_vm_address_t initPipeOrig {};
 static mach_vm_address_t initPipeConfigOrig {};
 static void *eventPipe {};
+// Interrupt IN pipes of the controller seen being created (audit #71): a new controller's pipe
+// replaces the remembered one as soon as it is created.
+static uint32_t pipesCreated {};
 // The pipe's own constructor cannot be routed on this build, so the interrupt IN pipe is learned from
 // its traffic instead: reads are wrapped on a budget until one of them is recognisably an HCI event.
 // Before this, eventPipe stayed null for the whole boot and no event was ever seen - all the
@@ -161,6 +169,9 @@ static void publishMirrors(const Ibtp::Mirror &m) {
 static uint32_t advDataCount, reportCount, hotspotAnswers, lastRssi;
 static uint32_t advTypeMask, reportTypeMask, reportEvtMask;
 static uint32_t shownTypeMask, shownEvtMask;
+// Per-Apple-type send counts of outgoing advertising data, so the identity beacons the phones
+// are supposed to resolve can be told apart from the ones nobody consumes.
+static uint32_t advTypeCounts[32];
 static bool inviteSaved;
 // The address last put on the filter accept list, and how often an advertiser used it. A policy-1
 // create can only match when these agree: the controller has no resolving list, so it compares the
@@ -189,6 +200,24 @@ static void witnessAdvData(const uint8_t *hci, size_t length) {
     advTypeMask |= types;
     publishValue("IbtpAdvDataTypes", advTypeMask);
     publishValue("IbtpAdvDataSets", ++advDataCount);
+    // Read-back of what the Mac actually broadcasts: per Apple type, the send count and the full
+    // advertising payload of its latest send (the payload holds every TLV of that set, so the
+    // per-type copies are equal; the type keys exist to answer "is this beacon still being sent").
+    // The identity beacons (0x0f/0x10) are the ones a phone needs in order to resolve the Mac;
+    // a missing or stale copy of those is the first suspect when phones never approach.
+    publishValue("IbtpAdvSetHandle", Ibtp::opcodeOf(hci) == Ibtp::OpLeExtAdvData ? hci[3] : 0);
+    char key[40];
+    for (unsigned t = 0; t < 32; ++t) {
+        if (!(types & (1U << t)))
+            continue;
+        snprintf(key, sizeof(key), "IbtpAdvType%02xCount", t);
+        publishValue(key, ++advTypeCounts[t]);
+        snprintf(key, sizeof(key), "IbtpAdvType%02xData", t);
+        if (OSData *raw = OSData::withBytes(hci + payload.offset, uint32_t(payload.length))) {
+            IORegistryEntry::getRegistryRoot()->setProperty(key, raw);
+            raw->release();
+        }
+    }
     // Keep one real 0x0D frame, so the payload can be read back byte for byte.
     if ((types & 1U << 0x0d) && !inviteSaved) {
         inviteSaved = true;
@@ -274,6 +303,7 @@ static uint32_t failCount;
 static uint16_t createOp;
 static uint8_t createPolicy, createAddrType, createPeerType, createPeer[6];
 static uint32_t createCompletes, connEvents, connOk, createStatuses, cancels;
+static uint32_t addrBackfills;
 static uint8_t createStatus, connStatus;
 // Which filter policies bluetoothd has used since boot, one bit each, and how often it named a peer
 // address. The last create alone cannot answer either: a policy 0 with a real address is the only
@@ -405,6 +435,10 @@ static uint32_t addedCommands {}, addedAddresses {}, addedFailures {};
 // The seed is counted apart from the follow-ups: it is the one command the whole workaround exists
 // for, and until this counter appeared there was no way to tell whether it ever left the machine.
 static uint32_t seededAddresses {}, seedFailures {};
+// Class of Device: codSeen counts writes the host itself issued (so the telemetry answers "does
+// bluetoothd ever write one on this machine?"), codFixes counts how many of those were held to the
+// laptop class, codSeeds counts the ones this kext injected after a reset.
+static uint32_t codSeen {}, codFixes {}, codWriteFailures {}, codSeeds {}, codSeedFails {};
 static IOReturn deviceRequestHook(void *that, IOService *provider, StandardUSB::DeviceRequest &request, void *data,
                                   IOMemoryDescriptor *descriptor, unsigned int &length,
                                   IOUSBHostCompletion *completion, uint32_t timeout) {
@@ -460,6 +494,30 @@ static IOReturn deviceRequestHook(void *that, IOService *provider, StandardUSB::
                 }
             }
         }
+        // Class of Device: bluetoothd takes the class from the last peer it saw, so connecting to a
+        // phone leaves the Mac advertising itself as a phone - and an iPhone then has no reason to
+        // treat it as a Mac, which is the gate in front of MagicPairing. Hold every write to the
+        // laptop class. Counted apart from the rewrite so the telemetry can answer whether this
+        // machine's host ever writes a class at all (codSeen) or leaves it at zero.
+        if (hciLength > 3 && Ibtp::opcodeOf(hci) == Ibtp::OpWriteClassOfDevice) {
+            publishValue("IbtpClassOfDeviceSeen", ++codSeen);
+            if (Ibtp::rewriteClassOfDevice(hci, hciLength)) {
+                bool written = false;
+                if (data) {
+                    lilu_os_memcpy(data, hci, hciLength);
+                    written = true;
+                } else if (descriptor && descriptor->prepare(kIODirectionIn) == kIOReturnSuccess) {
+                    written = descriptor->writeBytes(0, hci, hciLength) == hciLength;
+                    descriptor->complete(kIODirectionIn);
+                }
+                if (written)
+                    ++codFixes;
+                else
+                    ++codWriteFailures;
+                publishValue("IbtpClassOfDeviceFixes", codFixes);
+                publishValue("IbtpClassOfDeviceWriteFailed", codWriteFailures);
+            }
+        }
     }
     bool seedLegacyAddress = false;
     unsigned remoteReads = 0;
@@ -474,9 +532,10 @@ static IOReturn deviceRequestHook(void *that, IOService *provider, StandardUSB::
             mirror = Ibtp::Mirror{};
             park = Ibtp::Park{};
             mirrorOwner = that;
-            // A re-enumerated or second controller: the remembered pipe and any pending duplicates
-            // belonged to the old one.
-            eventPipe = nullptr;
+            // A re-enumerated or second controller: any pending duplicates belonged to the old one.
+            // The pipe is kept: it is created before the controller's first command, so forgetting it
+            // here left the event wrapping (and with it the data-length fix) off for good (#71).
+            // A new controller's pipe replaces it when that pipe is created.
             if (featureLock) {
                 IOSimpleLockLock(featureLock);
                 const uint32_t expired = features.expired, aborts = features.aborts;
@@ -658,6 +717,18 @@ static IOReturn deviceRequestHook(void *that, IOService *provider, StandardUSB::
     }
     const IOReturn result = FunctionCast(deviceRequestHook, deviceRequestOrig)(that, provider, request, data, descriptor,
                                                                               length, completion, timeout);
+    // A reset clears the controller's class, and on this machine nothing writes one afterwards:
+    // the internal-controller bring-up that would have is skipped because FoundBluetoothInterfaces()
+    // reports a USB dongle. Re-seed it immediately after the reset completes, in the same order a
+    // Mac's own bring-up uses, so the class is in place before any peer can look at it.
+    if (result == kIOReturnSuccess && codSeedOn && hciLength >= 3 && Ibtp::opcodeOf(hci) == Ibtp::OpReset) {
+        uint8_t cod[Ibtp::kClassOfDeviceCommandLength];
+        Ibtp::makeClassOfDeviceCommand(cod);
+        if (sendAdded(that, provider, request, cod, sizeof(cod), timeout) == kIOReturnSuccess)
+            publishValue("IbtpClassOfDeviceSeeds", ++codSeeds);
+        else
+            publishValue("IbtpClassOfDeviceSeedFails", ++codSeedFails);
+    }
     if (follow.setAddress || follow.eventMask) {
         // Only after the command it depends on was accepted. A set address that did not go out is
         // forgotten, so the next parameters command for that set tries again.
@@ -690,8 +761,10 @@ static void rememberEventPipe(void *that, StandardUSB::EndpointDescriptor const 
     // injection fail. The descriptor is the 7-byte USB layout: bEndpointAddress at offset 2 (bit 7 =
     // direction in), bmAttributes at offset 3 (bits 0-1 = type).
     auto *bytes = reinterpret_cast<const uint8_t *>(descriptor);
-    if (bytes[2] & 0x80 && (bytes[3] & 0x03) == 0x03)
+    if (bytes[2] & 0x80 && (bytes[3] & 0x03) == 0x03) {
         eventPipe = that;
+        publishValue("IbtpEventPipes", ++pipesCreated);
+    }
 }
 
 // The pipe is created through one of two overloads, depending on the macOS version.
@@ -736,6 +809,8 @@ static void readCompletion(void *owner, void *parameter, IOReturn status, uint32
     // Set when a feature-word answer was rewritten in place at the same size; the shared write-back
     // below only fires on a size change, so a same-size edit needs its own.
     bool featureEdited = false;
+    // Set when a connection-complete peer address was rewritten in place at the same size.
+    bool addrEdited = false;
     if (held) {
         // Anything shorter than 6 bytes cannot be one of the rewritten events.
         if (bytesTransferred >= 6) {
@@ -812,6 +887,26 @@ static void readCompletion(void *owner, void *parameter, IOReturn status, uint32
                 publishValue("IbtpConnCompletes", ++connEvents);
                 if (!connStatus)
                     publishValue("IbtpConnOk", ++connOk);
+                // An outgoing completion arrives with whatever address the controller actually
+                // matched - the rewritten fresh RPA when a create was rewritten. bluetoothd matches
+                // completions against the address it asked for and drops anything else ("we never
+                // asked to connect to it"), which killed every rewritten connection outright. The
+                // peer fields are restored to the requested ones before the event reaches user
+                // space; witnessCreate ran before the rewrite, so createPeer is exactly what the
+                // stack sent. Only central-role successes of a named create are touched: whitelist
+                // creates (all-zero peer) name no device to restore, and incoming connections carry
+                // the phone's own choice of address.
+                if (!connStatus && size >= 14 && event[6] == 0x00 &&
+                    (createPeer[0] | createPeer[1] | createPeer[2] |
+                     createPeer[3] | createPeer[4] | createPeer[5])) {
+                    if (event[7] != createPeerType ||
+                        memcmp(event + 8, createPeer, 6) != 0) {
+                        event[7] = createPeerType;
+                        memcpy(event + 8, createPeer, 6);
+                        publishValue("IbtpAddrBackfills", ++addrBackfills);
+                        addrEdited = true;
+                    }
+                }
             }
             // A parked round can wrap reads with no data-length round armed, so the board and its
             // lock are not guaranteed here; without the lock nothing is tracked at all.
@@ -825,7 +920,7 @@ static void readCompletion(void *owner, void *parameter, IOReturn status, uint32
             // only be claimed when every rewritten byte is really in the buffer: forwarding the
             // original size leaves stale feature bytes behind, the stack parses them as garbage
             // events and bluetoothd treats the parser desync as fatal (reason 607).
-            if (featureEdited && rewritten == size) {
+            if ((featureEdited || addrEdited) && rewritten == size) {
                 if (buffer->writeBytes(0, event, rewritten) == rewritten) {
                     bytesTransferred = uint32_t(rewritten);
                 } else {
@@ -976,17 +1071,19 @@ PluginConfiguration ADDPR(config) {
         widenOn = checkKernelArgument("-ibtpwiden");
         privacyOn = checkKernelArgument("-ibtpprivacy");
         rpaOn = !checkKernelArgument("-ibtpnorpa");
+        codSeedOn = !checkKernelArgument("-ibtpnocodseed");
         publishValue("IbtpParkEnabled", parkOn ? 1 : 0);
         publishValue("IbtpWidenEnabled", widenOn ? 1 : 0);
         publishValue("IbtpPrivacyEnabled", privacyOn ? 1 : 0);
         publishValue("IbtpRpaEnabled", rpaOn ? 1 : 0);
+        publishValue("IbtpCodSeedEnabled", codSeedOn ? 1 : 0);
         // Iteration tag, not a bundle version. The kernel's kext version parser takes three numeric
         // fields and stops - measured, not assumed: with CFBundleVersion set to "2.4.2.1", kmutil
         // silently dropped the whole bundle from its scan ("No extension with identifier"), which
         // would have failed the injection quietly. So the bundle version was frozen at 2.4.2 while
         // the in-flight iteration lived here and in the archive name; this finalized build moves
         // the real version to 2.4.3.
-        IORegistryEntry::getRegistryRoot()->setProperty("IbtpBuild", "2.4.3");
+        IORegistryEntry::getRegistryRoot()->setProperty("IbtpBuild", "2.4.6");
         // Arm the feature-word watch here, not when an ask shows up: the ask is a host command this
         // hook may never be called for, and arming on it left the watch dead for the whole boot when
         // it never came - indistinguishable from "the answer is not on a read". Reads inside the
