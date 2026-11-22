@@ -7,6 +7,7 @@
 //
 
 #include "ItlDma.hpp"
+#include <ItlDiag.hpp>
 #include <IOKit/IOLib.h>
 #include <libkern/c++/OSBoolean.h>
 
@@ -99,13 +100,13 @@ bool ItlDmaArena::initialize(IOPCIDevice *pci, IOService *controller, uint8_t bi
             return false;
     }
 #if __IO80211_TARGET == __MAC_15_2
-    owner->setProperty("ItlwmDMARevision", "sequoia-vtd-1");
+    ITL_DIAG_SET(owner, "ItlwmDMARevision", "sequoia-vtd-1");
 #else
-    owner->setProperty("ItlwmDMARevision", "tahoe-vtd-1");
+    ITL_DIAG_SET(owner, "ItlwmDMARevision", "tahoe-vtd-1");
 #endif
-    owner->setProperty("ItlwmDMAMapper", mode);
-    owner->setProperty("ItlwmDMAAddressBits", bits, 32);
-    owner->setProperty("ItlwmDMAPoolBytes", BlockCount * BlockSize, 32);
+    ITL_DIAG_SET(owner, "ItlwmDMAMapper", mode);
+    ITL_DIAG_SET(owner, "ItlwmDMAAddressBits", bits, 32);
+    ITL_DIAG_SET(owner, "ItlwmDMAPoolBytes", BlockCount * BlockSize, 32);
     IOLog("AirportItlwm: DMA mapper=%s bits=%u pool=%u MiB\n", mode, bits, BlockCount);
     return true;
 }

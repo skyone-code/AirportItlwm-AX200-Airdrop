@@ -6,6 +6,7 @@
 //  Copyright © 2023 钟先耀. All rights reserved.
 //
 #include "AirportItlwmV2.hpp"
+#include <ItlDiag.hpp>
 #include "AirportItlwmSkywalkInterface.hpp"
 #if defined(AW_NATIVE)
 #include "AwInterface.hpp"
@@ -310,11 +311,15 @@ IOReturn AirportItlwmSkywalkInterface::
 setVIRTUAL_IF_CREATE(apple80211_virt_if_create_data *data)
 {
     auto publish = [](AirportItlwm *controller, const char *key, UInt64 value) {
+#if ITL_TELEMETRY
         OSNumber *number = OSNumber::withNumber(value, 64);
         if (number) {
             controller->setProperty(key, number);
             number->release();
         }
+#else
+        (void)controller; (void)key; (void)value;
+#endif
     };
 
     if (!instance)
@@ -1258,7 +1263,7 @@ void AirportItlwmSkywalkInterface::postLinkQuality()
     const IOReturn result = itlReportLinkQualitySonoma(static_cast<IOSkywalkNetworkInterface *>(this), uint32_t(quality));
     if (result == kIOReturnSuccess)
         linkQualityReported = up ? quality : 0;
-    setProperty("ItlwmLinkQuality", uint64_t(uint32_t(quality)), 32);
-    setProperty("ItlwmLinkQualityResult", uint64_t(uint32_t(result)), 32);
+    ITL_DIAG_SET(this, "ItlwmLinkQuality", uint64_t(uint32_t(quality)), 32);
+    ITL_DIAG_SET(this, "ItlwmLinkQualityResult", uint64_t(uint32_t(result)), 32);
 }
 #endif

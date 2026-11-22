@@ -8,6 +8,7 @@
 
 #ifdef AIRPORT_WCL
 #include "../AirportItlwmV2.hpp"
+#include <ItlDiag.hpp>
 #include "../AirportItlwmSkywalkInterface.hpp"
 #include <kern/thread_call.h>
 #include <kern/clock.h>
@@ -758,8 +759,8 @@ void AirportItlwmSkywalkInterface::wclPostLinkQuality()
         const IOReturn result = itlReportLinkQuality(static_cast<IOSkywalkNetworkInterface *>(this), uint32_t(quality));
         if (result == kIOReturnSuccess)
             wclLinkQualityReported = quality;
-        instance->setProperty("ItlwmWCLLinkQuality", uint64_t(uint32_t(quality)), 32);
-        instance->setProperty("ItlwmWCLLinkQualityResult", uint64_t(uint32_t(result)), 32);
+        ITL_DIAG_SET(instance, "ItlwmWCLLinkQuality", uint64_t(uint32_t(quality)), 32);
+        ITL_DIAG_SET(instance, "ItlwmWCLLinkQualityResult", uint64_t(uint32_t(result)), 32);
     }
 #if __IO80211_TARGET != __MAC_15_2
     AirportWCL::LqmBeaconUpdate update = {};
@@ -767,9 +768,9 @@ void AirportItlwmSkywalkInterface::wclPostLinkQuality()
     update.rssi = rssi.aggregate_rssi;
     instance->postMessage(this, AirportWCL::LqmUpdate, &update, sizeof(update), true);
     if (++wclLqmPeriodicPosts == 1 || !(wclLqmPeriodicPosts % 30)) {
-        instance->setProperty("ItlwmWCLLqmPeriodicPosts", wclLqmPeriodicPosts, 32);
-        instance->setProperty("ItlwmWCLLqmBeaconPosts", wclLqmBeaconPosts, 32);
-        instance->setProperty("ItlwmWCLLqmLastRssi", uint64_t(uint32_t(rssi.aggregate_rssi)), 32);
+        ITL_DIAG_SET(instance, "ItlwmWCLLqmPeriodicPosts", wclLqmPeriodicPosts, 32);
+        ITL_DIAG_SET(instance, "ItlwmWCLLqmBeaconPosts", wclLqmBeaconPosts, 32);
+        ITL_DIAG_SET(instance, "ItlwmWCLLqmLastRssi", uint64_t(uint32_t(rssi.aggregate_rssi)), 32);
     }
 #endif
 }

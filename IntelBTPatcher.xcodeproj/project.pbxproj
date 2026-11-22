@@ -216,6 +216,7 @@
 					NeXT,
 					DRIVER_PRIVATE,
 					"APPLE_KEXT_ASSERTIONS=1",
+					"IBTP_DIAG=1",
 					"$(inherited)",
 				);
 				HEADER_SEARCH_PATHS = (
@@ -271,6 +272,7 @@
 					NeXT,
 					DRIVER_PRIVATE,
 					"APPLE_KEXT_ASSERTIONS=1",
+					"IBTP_DIAG=0",
 					"$(inherited)",
 				);
 				HEADER_SEARCH_PATHS = (

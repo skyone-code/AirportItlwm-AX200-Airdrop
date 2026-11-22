@@ -18,6 +18,7 @@
 static bool awdlRawSamples;
 #include <IOKit/acpi/IOACPIPlatformDevice.h>
 #include <AwObservation.hpp>
+#include <ItlDiag.hpp>
 #include <sys/_netstat.h>
 #include <crypto/sha1.h>
 #include <net80211/ieee80211_priv.h>
@@ -88,14 +89,14 @@ extern bool awBuildVerified();
 void AwNativeInterface::acceptNativeRequests()
 {
     nativeState.accept = true;
-    setProperty("AwIfNativeUp", true);
+    ITL_DIAG_SET(this, "AwIfNativeUp", true);
     int debug = 0;
     debugFlagsWanted = PE_parse_boot_argn("-itlawdlpmdebug", &debug, sizeof(debug));
     // The request carries a raw pointer at a fixed offset, a layout checked only for the verified
     // builds. On any other build (expected, or allowed by -itlawdlanybuild) the copy stays off.
     const bool wanted = !PE_parse_boot_argn("-itlawdlnomitx", &debug, sizeof(debug));
     masterIndicationEnabled = wanted && awBuildVerified();
-    setProperty("AwIfMiState", !wanted ? "off" : masterIndicationEnabled ? "on" : "blocked: build not verified");
+    ITL_DIAG_SET(this, "AwIfMiState", !wanted ? "off" : masterIndicationEnabled ? "on" : "blocked: build not verified");
 }
 
 IOReturn AwNativeInterface::getAWDL_AF_TX_MODE(apple80211_awdl_af_tx_mode *data)
@@ -118,7 +119,7 @@ IOReturn AwNativeInterface::setAWDL_AF_TX_MODE(apple80211_awdl_af_tx_mode *data)
     if (!data)
         return kIOReturnBadArgument;
     memcpy(&afTxModeValue, reinterpret_cast<const uint8_t *>(data) + 4, sizeof(afTxModeValue));
-    setProperty("AwIfAfTxMode", afTxModeValue, 32);
+    ITL_DIAG_SET(this, "AwIfAfTxMode", afTxModeValue, 32);
     return kIOReturnSuccess;
 }
 
@@ -133,17 +134,17 @@ IOReturn AwNativeInterface::noteOobRequest(const apple80211_awdl_oob_request *da
         return kIOReturnBadArgument;
     ++oobRequests;
     if (oobRequests == 1 || !(oobRequests % 16))
-        setProperty("AwIfOobRequests", oobRequests, 32);
+        ITL_DIAG_SET(this, "AwIfOobRequests", oobRequests, 32);
     if (!oobSampled && awdlRawSamples) {
         oobSampled = true;
         uint16_t length;
         memcpy(&length, reinterpret_cast<const uint8_t *>(data) + 0x28, sizeof(length));
         if (auto *sample = OSData::withBytes(data, 0x28)) {
-            setProperty("AwIfOobSample", sample);
+            ITL_DIAG_SET(this, "AwIfOobSample", sample);
             sample->release();
         }
-        setProperty("AwIfOobFirstName", name);
-        setProperty("AwIfOobFirstLength", length, 32);
+        ITL_DIAG_SET(this, "AwIfOobFirstName", name);
+        ITL_DIAG_SET(this, "AwIfOobFirstLength", length, 32);
     }
     return kIOReturnSuccess;
 }
@@ -172,20 +173,20 @@ void AwNativeInterface::storeMasterIndication(const apple80211_awdl_oob_request 
     if (reinterpret_cast<uintptr_t>(source) < 0xffffff8000000000ULL || !length || length > sizeof(masterIndication) ||
         !Aw::masterIndicationWellFormed(source, length)) {
         ++masterIndicationRejected;
-        setProperty("AwIfMiRejected", masterIndicationRejected, 32);
+        ITL_DIAG_SET(this, "AwIfMiRejected", masterIndicationRejected, 32);
         return;
     }
     memcpy(masterIndication, source, length);
     masterIndicationLength = length;
     ++masterIndicationUpdates;
     if (masterIndicationUpdates == 1 || !(masterIndicationUpdates % 64))
-        setProperty("AwIfMiUpdates", masterIndicationUpdates, 32);
-    setProperty("AwIfMiLength", length, 32);
+        ITL_DIAG_SET(this, "AwIfMiUpdates", masterIndicationUpdates, 32);
+    ITL_DIAG_SET(this, "AwIfMiLength", length, 32);
     // Keep the current template, since its first version is small and has no services.
     if (awdlRawSamples && masterIndicationSampledLength != length) {
         masterIndicationSampledLength = length;
         if (auto *sample = OSData::withBytes(source, length)) {
-            setProperty("AwIfMiSample", sample);
+            ITL_DIAG_SET(this, "AwIfMiSample", sample);
             sample->release();
         }
     }
@@ -224,7 +225,7 @@ bool AwNativeInterface::copyMasterIndication(uint8_t *output, size_t capacity, s
         memcpy(output, scratch, length);
         *written = length;
     } else {
-        setProperty("AwIfMiBuildFailed", true);
+        ITL_DIAG_SET(this, "AwIfMiBuildFailed", true);
     }
     IOFree(scratch, capacity);
     return built && length <= capacity;
@@ -234,16 +235,16 @@ IOReturn AwNativeInterface::setAWDL_SYNC_ENABLED(apple80211_awdl_sync_enabled *d
 {
     const IOReturn result = nativeState.setEnabled(data);
     if (result == kIOReturnUnsupported) {
-        setProperty("AwIfActivationBlocked", "radio-transport-unimplemented");
+        ITL_DIAG_SET(this, "AwIfActivationBlocked", "radio-transport-unimplemented");
         return unsupported("setAWDL_SYNC_ENABLED");
     }
     if (result == kIOReturnSuccess && nativeState.accept) {
-        setProperty("AwIfSyncEnabledRequested", data->enabled, 32);
+        ITL_DIAG_SET(this, "AwIfSyncEnabledRequested", data->enabled, 32);
         // The peer manager exists by now. Reject reasons are behind these flags.
         if (data->enabled && debugFlagsWanted && !debugFlagsSet) {
             debugFlagsSet = true;
             setDebugFlags(~0ULL, 0);
-            setProperty("AwIfDebugFlagsSet", true);
+            ITL_DIAG_SET(this, "AwIfDebugFlagsSet", true);
         }
     }
     return result;
@@ -253,11 +254,11 @@ IOReturn AwNativeInterface::setAWDL_SYNC_STATE(apple80211_awdl_sync_state *data)
 {
     const IOReturn result = nativeState.setState(data);
     if (result == kIOReturnUnsupported) {
-        setProperty("AwIfActivationBlocked", "radio-transport-unimplemented");
+        ITL_DIAG_SET(this, "AwIfActivationBlocked", "radio-transport-unimplemented");
         return unsupported("setAWDL_SYNC_STATE");
     }
     if (result == kIOReturnSuccess && nativeState.accept)
-        setProperty("AwIfSyncStateRequested", data->state, 32);
+        ITL_DIAG_SET(this, "AwIfSyncStateRequested", data->state, 32);
     return result;
 }
 
@@ -273,8 +274,8 @@ IOReturn AwNativeInterface::setAWDL_SYNC_FRAME_TEMPLATE(apple80211_awdl_sync_fra
     const IOReturn result = frameTemplate.set(data->payload, data->payload_len);
     IOLockUnlock(configurationLock);
     if (result == kIOReturnSuccess) {
-        setProperty("AwIfTemplateStored", data->payload_len != 0);
-        setProperty("AwIfLastStoredRequest", "AWDL_SYNC_FRAME_TEMPLATE");
+        ITL_DIAG_SET(this, "AwIfTemplateStored", data->payload_len != 0);
+        ITL_DIAG_SET(this, "AwIfLastStoredRequest", "AWDL_SYNC_FRAME_TEMPLATE");
     }
     return result;
 }
@@ -341,14 +342,14 @@ void AwNativeInterface::observeDataFrame(const uint8_t *frame, size_t length)
                         // The queue owns the packet now; don't touch or return it.
                         ++dataDelivered;
                         if (dataDelivered == 1 || !(dataDelivered % 16))
-                            setProperty("AwIfDataDelivered", dataDelivered, 32);
+                            ITL_DIAG_SET(this, "AwIfDataDelivered", dataDelivered, 32);
                         return;
                     }
                     ++dataDeliverFailed;
                     if (dataDeliverFailed == 1 || !(dataDeliverFailed % 32))
                         noteQueueState("AwIfQueueStateRefused");
-                    setProperty("AwIfDataDeliverFailed", dataDeliverFailed, 32);
-                    setProperty("AwIfDataDeliverLastError", delivered, 32);
+                    ITL_DIAG_SET(this, "AwIfDataDeliverFailed", dataDeliverFailed, 32);
+                    ITL_DIAG_SET(this, "AwIfDataDeliverLastError", delivered, 32);
                 }
                 bzero(bytes, wanted);
             }
@@ -361,11 +362,11 @@ void AwNativeInterface::observeDataFrame(const uint8_t *frame, size_t length)
     if (copied) ++dataCopySuccess;
     // Unbounded delivery must not write the registry for every failed frame.
     if (dataCopyAttempts > 16 && (dataCopyAttempts % 64)) return;
-    setProperty("AwIfDataCopyAttempts", dataCopyAttempts, 32);
-    setProperty("AwIfDataCopySuccess", dataCopySuccess, 32);
-    setProperty("AwIfDataCopyLastAllocation", allocated, 32);
-    setProperty("AwIfDataCopyLastPrepare", prepared, 32);
-    setProperty("AwIfDataCopyLastComplete", completed, 32);
+    ITL_DIAG_SET(this, "AwIfDataCopyAttempts", dataCopyAttempts, 32);
+    ITL_DIAG_SET(this, "AwIfDataCopySuccess", dataCopySuccess, 32);
+    ITL_DIAG_SET(this, "AwIfDataCopyLastAllocation", allocated, 32);
+    ITL_DIAG_SET(this, "AwIfDataCopyLastPrepare", prepared, 32);
+    ITL_DIAG_SET(this, "AwIfDataCopyLastComplete", completed, 32);
     // Deliberately no native RX enqueue, peer admission or data delivery.
 }
 
@@ -400,7 +401,7 @@ IOReturn AwNativeInterface::receiveManagementFrame(IO80211Controller *controller
         ++managementSubmissions;
         // Count submissions only. Native peer acceptance needs separate evidence.
         if (managementSubmissions == 1 || !(managementSubmissions % 100))
-            setProperty("AwIfManagementSubmissions", managementSubmissions, 32);
+            ITL_DIAG_SET(this, "AwIfManagementSubmissions", managementSubmissions, 32);
     }
     return result;
 }
@@ -409,6 +410,7 @@ IOReturn AwNativeInterface::receiveManagementFrame(IO80211Controller *controller
 // the native flag at +0xcc, which only IOSkywalkPacketQueue::initialize sets (25G241).
 void AwNativeInterface::noteQueueState(const char *key)
 {
+#if ITL_TELEMETRY
     char state[64];
     size_t used = 0;
     static const char *const names[] = {"txs", "txc", "rxs", "rxc"};
@@ -417,6 +419,9 @@ void AwNativeInterface::noteQueueState(const char *key)
                          packetQueues[i]->isEnabled() ? 1U : 0U,
                          unsigned(reinterpret_cast<const uint8_t *>(packetQueues[i])[0xcc] & 1));
     setProperty(key, state);
+#else
+    (void)key;
+#endif
 }
 
 void AwNativeInterface::noteTransmit(IOSkywalkPacket *const *packets, UInt32 count)
@@ -424,8 +429,8 @@ void AwNativeInterface::noteTransmit(IOSkywalkPacket *const *packets, UInt32 cou
     ++transmitCallbacks;
     transmitPackets += count;
     if (transmitCallbacks == 1 || !(transmitCallbacks % 64)) {
-        setProperty("AwIfTxCallbacks", transmitCallbacks, 32);
-        setProperty("AwIfTxPacketsOffered", transmitPackets, 32);
+        ITL_DIAG_SET(this, "AwIfTxCallbacks", transmitCallbacks, 32);
+        ITL_DIAG_SET(this, "AwIfTxPacketsOffered", transmitPackets, 32);
     }
     if (!awdlRawSamples || transmitSampled || !packets || !count || !packets[0]) return;
     auto *packet = reinterpret_cast<ItlSkywalkPacketView *>(packets[0]);
@@ -435,7 +440,7 @@ void AwNativeInterface::noteTransmit(IOSkywalkPacket *const *packets, UInt32 cou
     if (!bytes) return;
     transmitSampled = true;
     if (auto *sample = OSData::withBytes(bytes, min(length, 128U))) {
-        setProperty("AwIfTxSample", sample);
+        ITL_DIAG_SET(this, "AwIfTxSample", sample);
         sample->release();
     }
 }
@@ -599,19 +604,19 @@ bool AwNativeInterface::serviceTransmit()
             memmove(transmitDone, transmitDone + count, transmitDoneCount * sizeof(transmitDone[0]));
             transmitCompleted += count;
         } else {
-            setProperty("AwIfTxCompleteLastError", result, 32);
+            ITL_DIAG_SET(this, "AwIfTxCompleteLastError", result, 32);
         }
     }
     if (transmitCompleted != transmitLastPublished) {
         transmitLastPublished = transmitCompleted;
-        setProperty("AwIfTxAccepted", transmitAccepted, 32);
-        setProperty("AwIfTxCompleted", transmitCompleted, 32);
-        setProperty("AwIfTxDropped", transmitDropped, 32);
-        setProperty("AwIfTxHeldStashed", transmitHeldStashed, 32);
-        setProperty("AwIfTxHeldReleased", transmitHeldReleased, 32);
-        setProperty("AwIfTxHeldDropped", transmitHeldDropped, 32);
+        ITL_DIAG_SET(this, "AwIfTxAccepted", transmitAccepted, 32);
+        ITL_DIAG_SET(this, "AwIfTxCompleted", transmitCompleted, 32);
+        ITL_DIAG_SET(this, "AwIfTxDropped", transmitDropped, 32);
+        ITL_DIAG_SET(this, "AwIfTxHeldStashed", transmitHeldStashed, 32);
+        ITL_DIAG_SET(this, "AwIfTxHeldReleased", transmitHeldReleased, 32);
+        ITL_DIAG_SET(this, "AwIfTxHeldDropped", transmitHeldDropped, 32);
         if (auto *depths = OSData::withBytes(transmitDepthBins, sizeof(transmitDepthBins))) {
-            setProperty("AwIfTxDepthBins", depths);
+            ITL_DIAG_SET(this, "AwIfTxDepthBins", depths);
             depths->release();
         }
     }
@@ -638,7 +643,7 @@ UInt32 AwNativeInterface::deferReceive(OSObject *owner, IOSkywalkRxSubmissionQue
     if (auto *interface = OSDynamicCast(AwNativeInterface, owner)) {
         ++interface->receiveSupplyCallbacks;
         if (interface->receiveSupplyCallbacks == 1 || !(interface->receiveSupplyCallbacks % 64))
-            interface->setProperty("AwIfRxSupplyCallbacks", interface->receiveSupplyCallbacks, 32);
+            ITL_DIAG_SET(interface, "AwIfRxSupplyCallbacks", interface->receiveSupplyCallbacks, 32);
     }
     return 0;
 }
@@ -655,7 +660,7 @@ void AwNativeInterface::drainTransmitDone()
             const unsigned count = min(transmitDoneCount, 32U);
             const IOReturn result = itlTxComplete(packetQueues[1], reinterpret_cast<void *const *>(transmitDone), count, 0);
             if (result != kIOReturnSuccess) {
-                setProperty("AwIfTxCompleteLastError", result, 32);
+                ITL_DIAG_SET(this, "AwIfTxCompleteLastError", result, 32);
                 break;
             }
             transmitDoneCount -= count;
@@ -665,7 +670,7 @@ void AwNativeInterface::drainTransmitDone()
     }
     // Whatever is left can't be completed any more; never hand it back later, to a new queue.
     if (transmitDoneCount)
-        setProperty("AwIfTxAbandonedAtStop", transmitDoneCount, 32);
+        ITL_DIAG_SET(this, "AwIfTxAbandonedAtStop", transmitDoneCount, 32);
     transmitDoneCount = 0;
 }
 
@@ -737,10 +742,10 @@ void AwNativeInterface::noteClientEvent(const char *what, IOService *client, lon
                 text->release();
             }
         }
-        setProperty("AwIfClientEvents", list);
+        ITL_DIAG_SET(this, "AwIfClientEvents", list);
         list->release();
     }
-    setProperty("AwIfClientEventCount", clientEventCount, 32);
+    ITL_DIAG_SET(this, "AwIfClientEventCount", clientEventCount, 32);
 }
 
 bool AwNativeInterface::handleOpen(IOService *client, IOOptionBits options, void *argument)
@@ -802,8 +807,8 @@ IOReturn AwNativeInterface::initializeNetwork(IO80211Controller *controller,
                                            const ether_addr &address)
 {
     auto stage = [this, controller](const char *name) {
-        setProperty("AwIfNetworkStage", name);
-        controller->setProperty("AwIfNetworkStage", name);
+        ITL_DIAG_SET(this, "AwIfNetworkStage", name);
+        ITL_DIAG_SET(controller, "AwIfNetworkStage", name);
     };
     auto fail = [this, controller](IOReturn result) {
         stop(controller);
@@ -828,10 +833,10 @@ IOReturn AwNativeInterface::initializeNetwork(IO80211Controller *controller,
     // failure next to working delivery (#7). AwIfTransportReady was never set true by anything and is
     // no longer published; AwIfDataDelivered and the TX counters show the real state.
     if (dataCopyProbeEnabled) {
-        setProperty("AwIfDataCopyAttempts", uint64_t(0), 32);
-        setProperty("AwIfDataCopySuccess", uint64_t(0), 32);
+        ITL_DIAG_SET(this, "AwIfDataCopyAttempts", uint64_t(0), 32);
+        ITL_DIAG_SET(this, "AwIfDataCopySuccess", uint64_t(0), 32);
     }
-    setProperty("AwIfConfigurationMode", "requested-only");
+    ITL_DIAG_SET(this, "AwIfConfigurationMode", "requested-only");
     stage("starting");
     if (!IO80211AWDLProtocol::start(controller)) {
         stage("native-start-failed");
@@ -875,10 +880,10 @@ IOReturn AwNativeInterface::initializeNetwork(IO80211Controller *controller,
     if (PE_parse_boot_argn("itlawdlpooltype", &requestedPoolType, sizeof(requestedPoolType)) &&
         requestedPoolType >= 0 && requestedPoolType <= 2)
         poolType = UInt32(requestedPoolType);
-    setProperty("AwIfPoolType", poolType, 32);
+    ITL_DIAG_SET(this, "AwIfPoolType", poolType, 32);
     txPool = IOSkywalkPacketBufferPool::withName("itlwm-awdl-tx", this, poolType, &txOptions);
     rxPool = IOSkywalkPacketBufferPool::withName("itlwm-awdl-rx", this, poolType, &options);
-    setProperty("AwIfTxPoolPackets", txPoolPackets, 32);
+    ITL_DIAG_SET(this, "AwIfTxPoolPackets", txPoolPackets, 32);
     if (!txPool || !rxPool)
         return fail(kIOReturnNoMemory);
 
@@ -899,6 +904,7 @@ IOReturn AwNativeInterface::initializeNetwork(IO80211Controller *controller,
         ++addedQueues;
     }
 
+#if ITL_TELEMETRY
     int poolProbe = 0;
     if (PE_parse_boot_argn("-itlawdlpoolprobe", &poolProbe, sizeof(poolProbe))) {
         auto probe = [this](IOSkywalkPacketBufferPool *nativePool, IOEventSource *queue, const char *key) {
@@ -945,12 +951,13 @@ IOReturn AwNativeInterface::initializeNetwork(IO80211Controller *controller,
             const bool ok = prepared == kIOReturnSuccess && completed == kIOReturnSuccess && count == 1 && initialLength == 0 && set == kIOReturnSuccess &&
                 length == 56 && copied && reset == kIOReturnSuccess;
             setProperty(key, ok ? "lease-roundtrip-ok" : "lease-check-failed");
-            setProperty("AwIfPoolProbeBufferCount", count, 32);
-            setProperty("AwIfPoolProbeLength", length, 32);
+            ITL_DIAG_SET(this, "AwIfPoolProbeBufferCount", count, 32);
+            ITL_DIAG_SET(this, "AwIfPoolProbeLength", length, 32);
         };
         probe(txPool, packetQueues[0], "AwIfTxPoolProbe");
         probe(rxPool, packetQueues[2], "AwIfRxPoolProbe");
     }
+#endif
 
 
     IOSkywalkEthernetInterface::RegistrationInfo info = {};
@@ -995,7 +1002,7 @@ IOReturn AwNativeInterface::initializeNetwork(IO80211Controller *controller,
             transmitFrameCount = unsigned(requestedQueue);
         transmitFrames = static_cast<TransmitFrame *>(IOMalloc(sizeof(TransmitFrame) * transmitFrameCount));
         dataTransmitEnabled = transmitFrames != nullptr;
-        setProperty("AwIfTxQueueFrames", transmitFrameCount, 32);
+        ITL_DIAG_SET(this, "AwIfTxQueueFrames", transmitFrameCount, 32);
     }
     int queueEnable = 0;
     if (!PE_parse_boot_argn("-itlawdlcoexnodata", &queueEnable, sizeof(queueEnable))) {
@@ -1013,16 +1020,16 @@ IO80211VirtualInterface *AirportItlwm::createVirtualInterface(ether_addr *addres
 {
 #if defined(AW_NATIVE)
     if (awdlInterfaceTest && role == APPLE80211_VIF_AWDL) {
-        setProperty("AwIfFactoryStage", "entered");
+        ITL_DIAG_SET(this, "AwIfFactoryStage", "entered");
         if (!address)
             return nullptr;
         AwNativeInterface *interface = new AwNativeInterface;
         if (!interface) {
-            setProperty("AwIfFactoryStage", "allocation-failed");
+            ITL_DIAG_SET(this, "AwIfFactoryStage", "allocation-failed");
             return nullptr;
         }
         if (!interface->init(this, address, role, "awdl")) {
-            setProperty("AwIfFactoryStage", "initialization-failed");
+            ITL_DIAG_SET(this, "AwIfFactoryStage", "initialization-failed");
             interface->release();
             return nullptr;
         }
@@ -1031,8 +1038,8 @@ IO80211VirtualInterface *AirportItlwm::createVirtualInterface(ether_addr *addres
     // -itlawdlnonativeup keeps the interface deaf to the native stack.
     if (!PE_parse_boot_argn("-itlawdlnonativeup", &nativeUp, sizeof(nativeUp)))
         interface->acceptNativeRequests();
-        interface->setProperty("AwIfInterfaceBuild", ITL_AWDL_BUILD);
-        setProperty("AwIfFactoryStage", "initialized");
+        ITL_DIAG_SET(interface, "AwIfInterfaceBuild", ITL_AWDL_BUILD);
+        ITL_DIAG_SET(this, "AwIfFactoryStage", "initialized");
         return interface;
     }
 #endif
@@ -1076,7 +1083,7 @@ IOReturn AirportItlwm::receiveAWDLActionFrame(mbuf_t packet, size_t frameLength,
     const auto result = interface->receiveManagementFrame(this,
         static_cast<const uint8_t *>(mbuf_data(packet)), frameLength, channel, rssi);
     if (result != kIOReturnSuccess)
-        setProperty("AwIfManagementLastError", static_cast<uint32_t>(result), 32);
+        ITL_DIAG_SET(this, "AwIfManagementLastError", static_cast<uint32_t>(result), 32);
     interface->release();
     if (!--awdlManagementActive)
         _fWorkloop->commandWakeup(&awdlManagementActive);
@@ -1105,14 +1112,14 @@ IOReturn AirportItlwm::buildAWDLSyncProbe(mbuf_t *packet, uint64_t nowUS)
     if (!packet || *packet) return kIOReturnBadArgument;
     if (!awdlInterfaceTest || !_fWorkloop || !_fWorkloop->inGate() ||
         !awdlManagementInputEnabled || !fAWDLInterface) {
-        setProperty("AwIfSyncProbeStage", !awdlInterfaceTest ? "test-disabled" :
+        ITL_DIAG_SET(this, "AwIfSyncProbeStage", !awdlInterfaceTest ? "test-disabled" :
             !_fWorkloop ? "no-workloop" : !_fWorkloop->inGate() ? "outside-gate" :
             !awdlManagementInputEnabled ? "controller-not-ready" : "no-native-interface");
         return kIOReturnNotReady;
     }
     auto *snapshot = IONew(AwNativeInterface::FrameConfiguration, 1);
     if (!snapshot) {
-        setProperty("AwIfSyncProbeStage", "no-memory");
+        ITL_DIAG_SET(this, "AwIfSyncProbeStage", "no-memory");
         return kIOReturnNoMemory;
     }
     auto *interface = static_cast<AwNativeInterface *>(fAWDLInterface);
@@ -1134,15 +1141,15 @@ IOReturn AirportItlwm::buildAWDLSyncProbe(mbuf_t *packet, uint64_t nowUS)
     }
     interface->release();
     if (status != kIOReturnSuccess) {
-        setProperty("AwIfSyncProbeStage", "snapshot-not-ready");
+        ITL_DIAG_SET(this, "AwIfSyncProbeStage", "snapshot-not-ready");
         IODelete(snapshot, AwNativeInterface::FrameConfiguration, 1);
         return status;
     }
-    setProperty("AwIfSyncProbeTemplateLength", snapshot->templateLength, 32);
-    setProperty("AwIfSyncProbeStage", "snapshot-copied");
-    setProperty("AwIfRequestedTimingPresent", snapshot->hasRequestedTiming);
-    setProperty("AwIfRequestedAWLength", snapshot->parameters.availability_window_length, 32);
-    setProperty("AwIfRequestedAWPeriod", snapshot->parameters.availability_window_period, 32);
+    ITL_DIAG_SET(this, "AwIfSyncProbeTemplateLength", snapshot->templateLength, 32);
+    ITL_DIAG_SET(this, "AwIfSyncProbeStage", "snapshot-copied");
+    ITL_DIAG_SET(this, "AwIfRequestedTimingPresent", snapshot->hasRequestedTiming);
+    ITL_DIAG_SET(this, "AwIfRequestedAWLength", snapshot->parameters.availability_window_length, 32);
+    ITL_DIAG_SET(this, "AwIfRequestedAWPeriod", snapshot->parameters.availability_window_period, 32);
     // Reject contradictory native channel-sequence TLVs rather than claiming
     // the native requested sequence was applied to this fixed-channel test.
     bool valid = true;
@@ -1165,7 +1172,7 @@ IOReturn AirportItlwm::buildAWDLSyncProbe(mbuf_t *packet, uint64_t nowUS)
                                      sizeof(snapshot->staticTLVs), snapshot->address, uint8_t(itlAWDLFixedChannel()),
                                      uint8_t(itlAWDLChannelClass()), itlAWDLTwoStreams()))
     {
-        setProperty("AwIfPeerTLVs", "not-added");
+        ITL_DIAG_SET(this, "AwIfPeerTLVs", "not-added");
         ++awdlSyncPeerTLVsRefused;
     }
     uint8_t sync[73]; size_t syncLength = 0;
@@ -1202,7 +1209,7 @@ IOReturn AirportItlwm::buildAWDLSyncProbe(mbuf_t *packet, uint64_t nowUS)
                 mbuf_setlen(result,length); mbuf_pkthdr_setlen(result,length);
                 *packet = result; error = kIOReturnSuccess;
                 awdlProbeSequence = uint16_t((awdlProbeSequence + 1) & 4095);
-                setProperty("AwIfSyncProbeFrameLength", length, 32);
+                ITL_DIAG_SET(this, "AwIfSyncProbeFrameLength", length, 32);
             } else mbuf_freem(result);
         }
     }
@@ -1210,22 +1217,22 @@ IOReturn AirportItlwm::buildAWDLSyncProbe(mbuf_t *packet, uint64_t nowUS)
     // A failed frame still moves the sequence on, so a failing MI doesn't hold the alternation on itself.
     if (error != kIOReturnSuccess)
         awdlProbeSequence = uint16_t((awdlProbeSequence + 1) & 4095);
-    setProperty("AwIfSyncProbeStage", error == kIOReturnSuccess ? "frame-built" : stage);
+    ITL_DIAG_SET(this, "AwIfSyncProbeStage", error == kIOReturnSuccess ? "frame-built" : stage);
     if (error == kIOReturnSuccess)
         ++(isMI ? awdlSyncMIBuilt : isPSF ? awdlSyncPSFBuilt : awdlSyncFallbackBuilt);
     else
         ++awdlSyncFailed;
     const uint32_t syncTotal = awdlSyncMIBuilt + awdlSyncPSFBuilt + awdlSyncFallbackBuilt + awdlSyncFailed;
     if (syncTotal <= 4 || !(syncTotal % 16)) {
-        setProperty("AwIfSyncMIBuilt", awdlSyncMIBuilt, 32);
-        setProperty("AwIfSyncPSFBuilt", awdlSyncPSFBuilt, 32);
-        setProperty("AwIfSyncFallbackBuilt", awdlSyncFallbackBuilt, 32);
-        setProperty("AwIfSyncMIWanted", awdlSyncMIWanted, 32);
-        setProperty("AwIfSyncMIMissing", awdlSyncMIMissing, 32);
-        setProperty("AwIfSyncPeerTLVsRefused", awdlSyncPeerTLVsRefused, 32);
-        setProperty("AwIfSyncFailed", awdlSyncFailed, 32);
+        ITL_DIAG_SET(this, "AwIfSyncMIBuilt", awdlSyncMIBuilt, 32);
+        ITL_DIAG_SET(this, "AwIfSyncPSFBuilt", awdlSyncPSFBuilt, 32);
+        ITL_DIAG_SET(this, "AwIfSyncFallbackBuilt", awdlSyncFallbackBuilt, 32);
+        ITL_DIAG_SET(this, "AwIfSyncMIWanted", awdlSyncMIWanted, 32);
+        ITL_DIAG_SET(this, "AwIfSyncMIMissing", awdlSyncMIMissing, 32);
+        ITL_DIAG_SET(this, "AwIfSyncPeerTLVsRefused", awdlSyncPeerTLVsRefused, 32);
+        ITL_DIAG_SET(this, "AwIfSyncFailed", awdlSyncFailed, 32);
         if (awdlHideInfra)
-            setProperty("AwIfSyncInfraStripped", awdlSyncInfraStripped, 32);
+            ITL_DIAG_SET(this, "AwIfSyncInfraStripped", awdlSyncInfraStripped, 32);
     }
     return error;
 #else
@@ -1512,20 +1519,20 @@ bool AirportItlwm::init(OSDictionary *properties)
     // The interface is created by default since the coex stack became default-on; -itlawdlnoiface opts out.
     awdlInterfaceTest = awBuildAllowed() &&
         !PE_parse_boot_argn("-itlawdlnoiface", &awdlBootValue, sizeof(awdlBootValue));
-    setProperty("AwIfBuildCheck", awBuildStatus());
+    ITL_DIAG_SET(this, "AwIfBuildCheck", awBuildStatus());
     awdlRawSamples = PE_parse_boot_argn("-itlawdlsamples", &awdlBootValue, sizeof(awdlBootValue));
     // -itlawdlelicit used to extend the native sync template with the peer TLVs; default now.
     awdlExtendFrames = !PE_parse_boot_argn("-itlawdlnoelicit", &awdlBootValue, sizeof(awdlBootValue));
     awdlHideInfra = PE_parse_boot_argn("-itlawdlhideinfra", &awdlBootValue, sizeof(awdlBootValue));
-    setProperty("AwIfHideInfra", awdlHideInfra);
+    ITL_DIAG_SET(this, "AwIfHideInfra", awdlHideInfra);
     awdlCreateRequests = 0;
     awdlManagementInputEnabled = false;
     awdlManagementActive = 0;
-    setProperty("AwIfInterfaceBuild", ITL_AWDL_BUILD);
-    setProperty("AwIfInterfaceTestEnabled", awdlInterfaceTest ? kOSBooleanTrue : kOSBooleanFalse);
+    ITL_DIAG_SET(this, "AwIfInterfaceBuild", ITL_AWDL_BUILD);
+    ITL_DIAG_SET(this, "AwIfInterfaceTestEnabled", awdlInterfaceTest ? kOSBooleanTrue : kOSBooleanFalse);
     OSNumber *requests = OSNumber::withNumber(static_cast<UInt64>(0), 64);
     if (requests) {
-        setProperty("AwIfCreateRequests", requests);
+        ITL_DIAG_SET(this, "AwIfCreateRequests", requests);
         requests->release();
     }
     power_state = 0;
@@ -1663,6 +1670,7 @@ extern void itlMccSetBiosCountry(uint16_t);
 // Linux reads the country from WRDD as the BIOS source. Nothing here uses the values.
 static void itlMccProbeReadBios(IOPCIDevice *pci)
 {
+#if ITL_TELEMETRY
     int dummy;
     if (!PE_parse_boot_argn("-itlmccprobe", &dummy, sizeof(dummy)))
         return;
@@ -1690,6 +1698,9 @@ static void itlMccProbeReadBios(IOPCIDevice *pci)
     auto *country = entry ? OSDynamicCast(OSNumber, entry->getObject(1)) : nullptr;
     if (domain && country && domain->unsigned32BitValue() == 7 && country->unsigned32BitValue() <= 0xffff)
         itlMccSetBiosCountry(uint16_t(country->unsigned32BitValue()));
+#else
+    (void)pci;
+#endif
 }
 #endif
 
@@ -1702,6 +1713,7 @@ bool AirportItlwm::start(IOService *provider)
     itlLogStartup = true;
     const bool started = startDriver(provider);
     itlLogStartup = false;
+#if ITL_TELEMETRY
     if (IOPCIDevice *device = pciNub) {
         if (started) {
             device->removeProperty("ItlwmStartLog");
@@ -1714,6 +1726,7 @@ bool AirportItlwm::start(IOService *provider)
             device->setProperty("ItlwmStartResult", "failed");
         }
     }
+#endif
     return started;
 }
 
@@ -2710,6 +2723,7 @@ setPOWER(OSObject *object,
 // doesn't come here on 25G241: IO80211Family's internal set table sends it to its own stub.)
 static void noteUnhandledRequest(IOService *owner, const char *entry, unsigned cmd, unsigned request)
 {
+#if ITL_TELEMETRY
     if (ml_at_interrupt_context())
         return;
     static volatile SInt32 count;
@@ -2717,6 +2731,9 @@ static void noteUnhandledRequest(IOService *owner, const char *entry, unsigned c
     char snapshot[96];
     snprintf(snapshot, sizeof(snapshot), "%s cmd %u request %u count %d", entry, cmd, request, int(n));
     owner->setProperty("ItlwmUnhandledRequest", snapshot);
+#else
+    (void)owner; (void)entry; (void)cmd; (void)request;
+#endif
 }
 
 SInt32 AirportItlwm::apple80211_ioctl(IO80211SkywalkInterface *interface,unsigned long cmd,void *data, bool b1, bool b2)

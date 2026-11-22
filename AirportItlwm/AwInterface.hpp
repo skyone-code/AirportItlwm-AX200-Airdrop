@@ -1,6 +1,7 @@
 // Experimental native AWDL interface. No AWDL radio data path is implemented.
 #pragma once
 #include "AwTransmitHold.hpp"
+#include <ItlDiag.hpp>
 #include <Airport/IO80211AWDLProtocol.h>
 #include <Airport/IOSkywalkQueueFactories.h>
 #include "AwRequestedValue.hpp"
@@ -201,7 +202,7 @@ private:
         const IOReturn result = slot.set(data);
         IOLockUnlock(configurationLock);
         if (result == kIOReturnSuccess)
-            setProperty("AwIfLastStoredRequest", name);
+            ITL_DIAG_SET(this, "AwIfLastStoredRequest", name);
         return result;
     }
     template <typename T> IOReturn readRequested(const AwNativeRequestedValue<T> &slot,
@@ -225,7 +226,7 @@ private:
     bool registrationAttempted = false;
     uint32_t managementSubmissions = 0;
     IOReturn unsupported(const char *operation) {
-        setProperty("AwIfLastUnsupported", operation);
+        ITL_DIAG_SET(this, "AwIfLastUnsupported", operation);
         return kIOReturnUnsupported;
     }
 };

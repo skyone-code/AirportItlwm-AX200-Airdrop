@@ -52,8 +52,21 @@ enum : uint64_t { kRpaFreshNs = 30000000000ULL };
 
 // ---- telemetry -------------------------------------------------------------------------
 // Evidence for tests, in the I/O Registry root. Written only on rare events, in thread context.
+// IBTP_DIAG 默认 0：发行版不写任何 Ibtp* 诊断属性（IbtpBuild 版本标记除外）。
+#ifndef IBTP_DIAG
+#define IBTP_DIAG 0
+#endif
+#if IBTP_DIAG
+#define IBTP_DIAG_SET(entry, ...) ((entry)->setProperty(__VA_ARGS__))
+#else
+#define IBTP_DIAG_SET(entry, ...) ((void)0)
+#endif
 static void publishValue(const char *key, uint32_t value) {
+#if IBTP_DIAG
     IORegistryEntry::getRegistryRoot()->setProperty(key, value, 32);
+#else
+    (void)key; (void)value;
+#endif
 }
 static uint32_t bump(uint32_t &counter) { return __atomic_add_fetch(&counter, 1, __ATOMIC_RELAXED); }
 // Publishes a counter that changed, outside the spinlock, since a registry write allocates.
@@ -158,7 +171,7 @@ static void publishMirrors(const Ibtp::Mirror &m) {
     if (bits == mirrorBits)
         return;
     mirrorBits = bits;
-    IORegistryEntry::getRegistryRoot()->setProperty("IbtpMirrors", bits, 32);
+    IBTP_DIAG_SET(IORegistryEntry::getRegistryRoot(), "IbtpMirrors", bits, 32);
 }
 
 // ---- Continuity witness ----------------------------------------------------------------
@@ -171,7 +184,7 @@ static uint32_t advTypeMask, reportTypeMask, reportEvtMask;
 static uint32_t shownTypeMask, shownEvtMask;
 // Per-Apple-type send counts of outgoing advertising data, so the identity beacons the phones
 // are supposed to resolve can be told apart from the ones nobody consumes.
-static uint32_t advTypeCounts[32];
+static uint32_t advTypeCounts[32] __attribute__((unused));
 static bool inviteSaved;
 // The address last put on the filter accept list, and how often an advertiser used it. A policy-1
 // create can only match when these agree: the controller has no resolving list, so it compares the
@@ -206,6 +219,7 @@ static void witnessAdvData(const uint8_t *hci, size_t length) {
     // The identity beacons (0x0f/0x10) are the ones a phone needs in order to resolve the Mac;
     // a missing or stale copy of those is the first suspect when phones never approach.
     publishValue("IbtpAdvSetHandle", Ibtp::opcodeOf(hci) == Ibtp::OpLeExtAdvData ? hci[3] : 0);
+#if IBTP_DIAG
     char key[40];
     for (unsigned t = 0; t < 32; ++t) {
         if (!(types & (1U << t)))
@@ -213,18 +227,25 @@ static void witnessAdvData(const uint8_t *hci, size_t length) {
         snprintf(key, sizeof(key), "IbtpAdvType%02xCount", t);
         publishValue(key, ++advTypeCounts[t]);
         snprintf(key, sizeof(key), "IbtpAdvType%02xData", t);
+        #if IBTP_DIAG
         if (OSData *raw = OSData::withBytes(hci + payload.offset, uint32_t(payload.length))) {
-            IORegistryEntry::getRegistryRoot()->setProperty(key, raw);
+            IBTP_DIAG_SET(IORegistryEntry::getRegistryRoot(), key, raw);
             raw->release();
+        
         }
+        #endif
     }
+#endif
     // Keep one real 0x0D frame, so the payload can be read back byte for byte.
     if ((types & 1U << 0x0d) && !inviteSaved) {
         inviteSaved = true;
+        #if IBTP_DIAG
         if (OSData *raw = OSData::withBytes(hci + payload.offset, uint32_t(payload.length))) {
-            IORegistryEntry::getRegistryRoot()->setProperty("IbtpInviteFrame", raw);
+            IBTP_DIAG_SET(IORegistryEntry::getRegistryRoot(), "IbtpInviteFrame", raw);
             raw->release();
+        
         }
+        #endif
     }
 }
 static void witnessAdvReport(const uint8_t *event, size_t size) {
@@ -252,10 +273,13 @@ static void witnessAdvReport(const uint8_t *event, size_t size) {
         if (Ibtp::reportConnectable(items[i].eventType) && Ibtp::addressResolvable(items[i].addr)) {
             if (!Ibtp::addressEquals(items[i].addr, rpaAddr)) {
                 lilu_os_memcpy(rpaAddr, items[i].addr, sizeof(rpaAddr));
+                #if IBTP_DIAG
                 if (OSData *raw = OSData::withBytes(rpaAddr, sizeof(rpaAddr))) {
-                    IORegistryEntry::getRegistryRoot()->setProperty("IbtpRpaLast", raw);
+                    IBTP_DIAG_SET(IORegistryEntry::getRegistryRoot(), "IbtpRpaLast", raw);
                     raw->release();
+                
                 }
+                #endif
             }
             rpaStamp = now;
             publishValue("IbtpRpaSeen", ++rpaSeen);
@@ -274,10 +298,13 @@ static void witnessAdvReport(const uint8_t *event, size_t size) {
         // all depend on this frame ever being seen.
         publishValue("IbtpTetherSources", ++hotspotAnswers);
         publishValue("IbtpTetherRssi", lastRssi);
+        #if IBTP_DIAG
         if (OSData *raw = OSData::withBytes(items[count - 1].addr, 6)) {
-            IORegistryEntry::getRegistryRoot()->setProperty("IbtpTetherAddr", raw);
+            IBTP_DIAG_SET(IORegistryEntry::getRegistryRoot(), "IbtpTetherAddr", raw);
             raw->release();
+        
         }
+        #endif
     }
     if (!(++reportCount & 15))
         publishValue("IbtpAdvReports", reportCount);
@@ -289,10 +316,13 @@ static void witnessAdvReport(const uint8_t *event, size_t size) {
     if (heard)
         publishValue("IbtpAcceptAddrHeard", ++acceptAddrHeard);
     if ((++advAddrCount & 63) == 0) {
+        #if IBTP_DIAG
         if (OSData *raw = OSData::withBytes(items[count - 1].addr, 6)) {
-            IORegistryEntry::getRegistryRoot()->setProperty("IbtpAdvLastAddr", raw);
+            IBTP_DIAG_SET(IORegistryEntry::getRegistryRoot(), "IbtpAdvLastAddr", raw);
             raw->release();
+        
         }
+        #endif
     }
 }
 // What the create asked for and what the controller answered.
@@ -309,7 +339,7 @@ static uint8_t createStatus, connStatus;
 // address. The last create alone cannot answer either: a policy 0 with a real address is the only
 // form the controller can act on without a resolving list, so whether that form ever appears decides
 // which fix is even possible.
-static uint32_t policySeen, peersGiven;
+static uint32_t policySeen __attribute__((unused)), peersGiven __attribute__((unused));
 static void witnessCreate(const uint8_t *hci, size_t length) {
     if (!hci || length < 3)
         return;
@@ -330,26 +360,26 @@ static void witnessCreate(const uint8_t *hci, size_t length) {
     } else {
         return;
     }
-    IORegistryEntry::getRegistryRoot()->setProperty("IbtpCreateOpcode", createOp, 16);
-    IORegistryEntry::getRegistryRoot()->setProperty("IbtpCreateFilterPolicy", createPolicy, 8);
-    IORegistryEntry::getRegistryRoot()->setProperty("IbtpCreateAddrType", createAddrType, 8);
-    IORegistryEntry::getRegistryRoot()->setProperty("IbtpCreatePeerType", createPeerType, 8);
-    IORegistryEntry::getRegistryRoot()->setProperty("IbtpCreatePeerAddr", createPeer, 6);
+    IBTP_DIAG_SET(IORegistryEntry::getRegistryRoot(), "IbtpCreateOpcode", createOp, 16);
+    IBTP_DIAG_SET(IORegistryEntry::getRegistryRoot(), "IbtpCreateFilterPolicy", createPolicy, 8);
+    IBTP_DIAG_SET(IORegistryEntry::getRegistryRoot(), "IbtpCreateAddrType", createAddrType, 8);
+    IBTP_DIAG_SET(IORegistryEntry::getRegistryRoot(), "IbtpCreatePeerType", createPeerType, 8);
+    IBTP_DIAG_SET(IORegistryEntry::getRegistryRoot(), "IbtpCreatePeerAddr", createPeer, 6);
     if (createPolicy < 32 && !(policySeen & (1U << createPolicy))) {
         policySeen |= 1U << createPolicy;
-        IORegistryEntry::getRegistryRoot()->setProperty("IbtpCreatePolicyMask", policySeen, 32);
+        IBTP_DIAG_SET(IORegistryEntry::getRegistryRoot(), "IbtpCreatePolicyMask", policySeen, 32);
     }
     bool named = false;
     for (unsigned i = 0; i < 6; ++i)
         named = named || createPeer[i] != 0;
     if (named)
-        IORegistryEntry::getRegistryRoot()->setProperty("IbtpCreateWithPeer", ++peersGiven, 32);
+        IBTP_DIAG_SET(IORegistryEntry::getRegistryRoot(), "IbtpCreateWithPeer", ++peersGiven, 32);
 }
 
 // What goes on the filter accept list, and whether anything ever goes on the resolving list. Without
 // a resolving list the controller compares accept-list entries literally, so the type and value here
 // are the whole reason a policy-1 create cannot match a peer advertising from a private address.
-static uint32_t acceptAdds, resolvingAdds;
+static uint32_t acceptAdds __attribute__((unused)), resolvingAdds __attribute__((unused));
 static void witnessLists(const uint8_t *hci, size_t length) {
     if (!hci || length < 10)
         return;
@@ -357,15 +387,17 @@ static void witnessLists(const uint8_t *hci, size_t length) {
     if (op != Ibtp::OpLeAcceptListAdd && op != Ibtp::OpLeResolvingAdd)
         return;
     // Both commands are address type then address. The rest of the resolving entry is the IRK.
+#if IBTP_DIAG
     auto *root = IORegistryEntry::getRegistryRoot();
     if (op == Ibtp::OpLeAcceptListAdd)
-        root->setProperty("IbtpAcceptAdds", ++acceptAdds, 32);
+        IBTP_DIAG_SET(root, "IbtpAcceptAdds", ++acceptAdds, 32);
     else
-        root->setProperty("IbtpResolvingAdds", ++resolvingAdds, 32);
-    root->setProperty("IbtpListLastType", uint32_t(hci[3]), 8);
+        IBTP_DIAG_SET(root, "IbtpResolvingAdds", ++resolvingAdds, 32);
+    IBTP_DIAG_SET(root, "IbtpListLastType", uint32_t(hci[3]), 8);
+#endif
     uint8_t addr[6];
     memcpy(addr, hci + 4, sizeof(addr));
-    root->setProperty("IbtpListLastAddr", addr, 6);
+    IBTP_DIAG_SET(root, "IbtpListLastAddr", addr, 6);
     if (op == Ibtp::OpLeAcceptListAdd)
         memcpy(acceptAddr, addr, sizeof(acceptAddr));
 }
@@ -374,24 +406,29 @@ static void witnessLists(const uint8_t *hci, size_t length) {
 // standard LE Add Device To Resolving List, so a controller that never sees one is a controller the
 // host never asked to resolve anything. Opcode plus the first bytes of the payload identify the
 // family without guessing at a payload layout this driver has no other way to learn.
-static uint32_t vendorCount;
+static uint32_t vendorCount __attribute__((unused));
 static void witnessVendor(const uint8_t *hci, size_t length) {
     if (!hci || length < 3)
         return;
     const uint16_t op = Ibtp::opcodeOf(hci);
     if ((op & 0xfc00) != 0xfc00)
         return;
+#if IBTP_DIAG
     auto *root = IORegistryEntry::getRegistryRoot();
     root->setProperty("IbtpVendorLastOpcode", uint32_t(op), 16);
     root->setProperty("IbtpVendorLastLength", uint32_t(length), 16);
     const size_t take = length > 3 ? (length - 3 > 24 ? 24 : length - 3) : 0;
     if (take) {
+        #if IBTP_DIAG
         if (OSData *params = OSData::withBytes(hci + 3, uint32_t(take))) {
-            root->setProperty("IbtpVendorLastParams", params);
+            IBTP_DIAG_SET(root, "IbtpVendorLastParams", params);
             params->release();
+        
         }
+        #endif
     }
-    root->setProperty("IbtpVendorCmds", ++vendorCount, 32);
+    IBTP_DIAG_SET(root, "IbtpVendorCmds", ++vendorCount, 32);
+#endif
 }
 
 // Intel's vendor ID also sits on hubs and other devices. Without the controller's product name it
@@ -598,10 +635,13 @@ static IOReturn deviceRequestHook(void *that, IOService *provider, StandardUSB::
                 // What actually left the machine: the six peer bytes, so a dead create can be told
                 // from one aimed at a stale address. Extended form: policy[3], peerType[4],
                 // peer[6..11]; legacy: policy[7], peerType[8], peer[9..14].
+                #if IBTP_DIAG
                 if (OSData *raw = OSData::withBytes(hci + createPeerOffset, 6)) {
-                    IORegistryEntry::getRegistryRoot()->setProperty("IbtpRpaApplied", raw);
+                    IBTP_DIAG_SET(IORegistryEntry::getRegistryRoot(), "IbtpRpaApplied", raw);
                     raw->release();
+                
                 }
+                #endif
             } else if (createWriteFailed) {
                 // Conditions matched at the top but the prepared write was refused - counted apart
                 // from a stale address, because this one needs code, not patience.
@@ -855,7 +895,7 @@ static void readCompletion(void *owner, void *parameter, IOReturn status, uint32
                 featureWord = 0;
                 for (int i = 0; i < 8; ++i)
                     featureWord |= uint64_t(event[5 + i]) << (8 * i);
-                IORegistryEntry::getRegistryRoot()->setProperty("IbtpLEFeatures", featureWord, 64);
+                IBTP_DIAG_SET(IORegistryEntry::getRegistryRoot(), "IbtpLEFeatures", featureWord, 64);
                 publishValue("IbtpLEFeatureReads", ++featureReads);
                 if (privacyOn && !event[2] && !(event[5] & 0x40)) {
                     event[5] |= 0x40;
@@ -875,7 +915,7 @@ static void readCompletion(void *owner, void *parameter, IOReturn status, uint32
                 if (witnessStatus && (witnessOp & 0xfc00) == 0x2000) {
                     failOp = witnessOp;
                     failStatus = witnessStatus;
-                    IORegistryEntry::getRegistryRoot()->setProperty("IbtpLeFailOp", failOp, 16);
+                    IBTP_DIAG_SET(IORegistryEntry::getRegistryRoot(), "IbtpLeFailOp", failOp, 16);
                     publishValue("IbtpLeFailStatus", failStatus);
                     publishValue("IbtpLeFails", ++failCount);
                 }

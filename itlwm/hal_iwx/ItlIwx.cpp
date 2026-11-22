@@ -113,6 +113,7 @@
 #include <linux/types.h>
 #include <linux/kernel.h>
 #include <FwData.h>
+#include <ItlDiag.hpp>
 #include <AwFrameParser.hpp>
 #include <AwFrameBuilder.hpp>
 #include <AwProbePolicy.hpp>
@@ -6187,7 +6188,7 @@ static uint32_t awdlCoexScanHoldPushes;
 // v59: joins that moved the listener off its own channel. While nothing is joined the listener needs a private
 // PHY context and a channel of its own; the moment a station exists the firmware schedules AWDL on the
 // station's context, on the AP's channel, and the private one is the wrong place to send from.
-static uint32_t awdlCoexRestations;
+static uint32_t awdlCoexRestations __attribute__((unused));
 // v56: what counts as "transferring". An idle AWDL still emits a handful of data frames a second (measured
 // 0.6/s), so v55's "any data frame in the last 5 s" was true for ever and no sweep ever ran again -- the
 // panel lived on cache and would have emptied. A running transfer is thousands of frames a second, so the
@@ -6698,7 +6699,7 @@ static uint64_t awdlCoexSchedPeerRxUS;
 // (PeerSchedule::assumeZero), so pauses and the gate work from the first sync frame after each anchor.
 static bool awdlCoexAssumeZero = true;
 static Aw::BaTrace awdlCoexBaTrace;
-static uint32_t awdlCoexBaTracePublished;
+static uint32_t awdlCoexBaTracePublished __attribute__((unused));
 // Sample from the coex timer so silence between Block Acks is represented too.
 // The most recent completion snapshot is valid only for the same queue owner.
 struct CoexBaRefillSample {
@@ -6841,6 +6842,7 @@ static uint32_t mgmtQidFallbacks, mgmtQidFallbackFails;
 static uint32_t probePassive5GChans;
 static void awdlCoexPublish()
 {
+#if ITL_TELEMETRY
     auto *root = IORegistryEntry::getRegistryRoot();
     root->setProperty("ItlwmMgmtQidFallbacks", mgmtQidFallbacks, 32);
     root->setProperty("ItlwmMgmtQidFallbackFails", mgmtQidFallbackFails, 32);
@@ -7373,6 +7375,9 @@ static void awdlCoexPublish()
     root->setProperty("AwCoexReclaimTail", awdlReclaimTail, 32);
     root->setProperty("AwCoexReclaimCur", awdlReclaimCur, 32);
     root->setProperty("AwCoexReclaimCount", awdlReclaimCount, 32);
+#else
+    (void)0; // 发行版：无诊断属性
+#endif
 }
 // The firmware recognises acknowledgements only to the address in its MAC context. If setting our AWDL
 // address there fails, or macOS changes the address, every unicast frame looks unacknowledged: on
@@ -7436,9 +7441,9 @@ static void awdlNoteRadioStatistics(const Statistics &stats)
 
 static uint32_t awdlRxAllFrames; // Every frame received, never reset.
 static Aw::TxTrace awdlTxTrace;
-static uint32_t awdlTxTracePublished;
+static uint32_t awdlTxTracePublished __attribute__((unused));
 static Aw::BaTrace awdlBaTrace;
-static uint32_t awdlBaTracePublished;
+static uint32_t awdlBaTracePublished __attribute__((unused));
 // The peer's schedule is always tracked (it only counts); -itlawdlpeerpause acts on it.
 static Aw::PeerSchedule awdlPeerSchedule;
 static Aw::PeerPauseState awdlPeerPauseState;
@@ -7574,6 +7579,7 @@ static uint32_t mccUptimeSeconds()
 }
 static void mccProbePublish()
 {
+#if ITL_TELEMETRY
     auto *root = IORegistryEntry::getRegistryRoot();
     if (auto *samples = OSData::withBytes(mccSamples, unsigned(mccSampleCount * sizeof(mccSamples[0])))) {
         root->setProperty("ITLMCCSamples", samples);
@@ -7585,6 +7591,7 @@ static void mccProbePublish()
     }
     root->setProperty("ITLMCCNoticeTotal", mccNoticeTotal, 32);
     root->setProperty("ITLMCCNoticeLastSeconds", mccNoticeLastSeconds, 32);
+#endif
 }
 static Aw::DataSkipCounts awdlDataSkips;
 static unsigned awdlRxIndex;
@@ -7615,6 +7622,7 @@ static bool awdlPeerAudible()
 // The bodies are unencrypted broadcasts and may carry a device or host name.
 static void awdlKeepSample(const char *key, const uint8_t *frame, size_t length)
 {
+#if ITL_TELEMETRY
     if (!awdlRawSamples)
         return;
     auto *root = IORegistryEntry::getRegistryRoot();
@@ -7624,6 +7632,9 @@ static void awdlKeepSample(const char *key, const uint8_t *frame, size_t length)
         root->setProperty(key, sample);
         sample->release();
     }
+#else
+    (void)key; (void)frame; (void)length;
+#endif
 }
 
 void ItlIwx::
@@ -7878,11 +7889,13 @@ awdlRxObserve(struct iwx_softc *sc, mbuf_t m, int chanidx, int rssi, uint32_t ti
         const unsigned kind = subtype == 0 ? 0 : 1;
         if (frameLength > awdlLargestPeer[kind]) {
             awdlLargestPeer[kind] = frameLength;
+#if ITL_TELEMETRY
             if (!awdlRawSamples) {
             } else if (auto *largest = OSData::withBytes(f, unsigned(MIN(frameLength, size_t(2048))))) {
                 IORegistryEntry::getRegistryRoot()->setProperty(kind ? "AwSampleLargestMIF" : "AwSampleLargestPSF", largest);
                 largest->release();
             }
+#endif
         }
     }
     if (subtype == 0)
@@ -7950,7 +7963,7 @@ awdlCoexCycleTask(void *arg)
         awdlCoexWant = !awdlCoexWant;
         ++awdlCoexCycleFlips;
         (void)that->awdlCoexListener(sc, awdlCoexWant);
-        IORegistryEntry::getRegistryRoot()->setProperty("AwCoexCycleFlips", awdlCoexCycleFlips, 32);
+        ITL_DIAG_SET(IORegistryEntry::getRegistryRoot(), "AwCoexCycleFlips", awdlCoexCycleFlips, 32);
     }
     if (!awdlStopping)
         timeout_add_sec(&awdlCoexTimer, awdlCoexCycleSecs);
@@ -8420,6 +8433,7 @@ awdlCoexTxTask(void *arg)
                     uint16_t(sameQueue ? last.refilled : 0), flags, uint8_t(awdlCoexChannel), awdlCoexBaRefillKicks
                 };
                 if (now - awdlCoexBaTimelinePublishedUS >= 1000000ULL) {
+#if ITL_TELEMETRY
                     const size_t size = offsetof(CoexBaTimeline, entries) +
                         MIN(timeline.count, CoexBaTimeline::capacity) * sizeof(CoexBaTimelineEntry);
                     if (auto *data = OSData::withBytes(&timeline, size)) {
@@ -8427,6 +8441,7 @@ awdlCoexTxTask(void *arg)
                             awdlCoexBaTimelinePublishedUS = now;
                         data->release();
                     }
+#endif
                 }
             }
         }
@@ -9617,6 +9632,7 @@ awdlRxTask(void *arg)
     const uint64_t summaryNowUS = awdlUptimeUS();
     if (!awdlPeerTrain || !lastSummaryUS || summaryNowUS - lastSummaryUS >= 6000000) {
     lastSummaryUS = summaryNowUS;
+#if ITL_TELEMETRY
     awdlLog("mode %d state %d ch %d: all %u mgmt %u beacon %u psf %u mif %u other %u peers %u lastch %d rssi %d\n",
           ic->ic_opmode, ic->ic_state, running ? ieee80211_chan2ieee(ic, sc->sc_phyctxt[0].channel) : -1,
           awdlRxStat.all, awdlRxStat.mgmt, awdlRxStat.beacon, awdlRxStat.psf, awdlRxStat.mif, awdlRxStat.other,
@@ -9925,6 +9941,7 @@ awdlRxTask(void *arg)
             }
         }
     }
+#endif // ITL_TELEMETRY — 发行版不写任何 Aw* 诊断属性
     }
     if (running && !that->awdlMonitorPending) {
         if (!awdlRxBurstDone) {
@@ -10032,14 +10049,16 @@ awdlRxTask(void *arg)
                     that->awdlMonitorSubmitted};
                 ++awdlTxStallCount;
             }
+#if ITL_TELEMETRY
             auto *root = IORegistryEntry::getRegistryRoot();
             if (auto *stalls = OSData::withBytes(awdlTxStalls, unsigned(awdlTxStallCount * sizeof(awdlTxStalls[0])))) {
                 root->setProperty("AwTxStalls", stalls);
                 stalls->release();
             }
+#endif
             if (awdlTxStallCount >= 2) {
                 awdlWindow = 1;
-                root->setProperty("AwTxWindow", awdlWindow, 32);
+                ITL_DIAG_SET(IORegistryEntry::getRegistryRoot(), "AwTxWindow", awdlWindow, 32);
             }
             awdlTxBusySinceUS = 0;
             task_add(systq, &sc->init_task);
@@ -12920,8 +12939,8 @@ void ItlIwx::awdlApplyMacAddress(struct iwx_softc *sc, const uint8_t *address)
     ++(result ? awdlMacApplyFailures : awdlMacApplies);
     awdlSessLog("firmware address set %s (%d)\n", result ? "failed" : "ok", result);
     awdlTxLog("MAC context address change result %d\n", result);
-    IORegistryEntry::getRegistryRoot()->setProperty("AwMacContextResult", uint64_t(result ? 1 : 0), 32);
-    IORegistryEntry::getRegistryRoot()->setProperty("AwMacContextGeneration", sc->sc_generation, 32);
+    ITL_DIAG_SET(IORegistryEntry::getRegistryRoot(), "AwMacContextResult", uint64_t(result ? 1 : 0), 32);
+    ITL_DIAG_SET(IORegistryEntry::getRegistryRoot(), "AwMacContextGeneration", sc->sc_generation, 32);
 }
 
 void ItlIwx::iwx_awdl_transport_probe(struct iwx_softc *sc)
@@ -21927,9 +21946,11 @@ pollLostInterrupt()
     // Publish live counters so a stall can be diagnosed from the registry
     // without a debug build (release kprintf output is invisible).
     if (pending || (msipollChecks % 20) == 0) {
+#if ITL_TELEMETRY
         auto *root = IORegistryEntry::getRegistryRoot();
         root->setProperty("AwPollChecks", msipollChecks, 32);
         root->setProperty("AwPollReaps", msipollReaps, 32);
+#endif
     }
 }
 #endif
@@ -22371,6 +22392,7 @@ iwx_attach(struct iwx_softc *sc, struct pci_attach_args *pa)
             awdlForeignControl = awdlElicit && PE_parse_boot_argn("-itlawdlackcontrol", &dummy, sizeof(dummy));
             awdlDataTx = awdlMacProbe && PE_parse_boot_argn("-itlawdldatatx", &dummy, sizeof(dummy));
             itlLogOn = true;
+#if ITL_TELEMETRY
             if (OSSerializer *live = OSSerializer::forTarget(nullptr, itlLogSerialize)) {
                 IORegistryEntry::getRegistryRoot()->setProperty("AwLog", live);
                 live->release();
@@ -22387,6 +22409,7 @@ iwx_attach(struct iwx_softc *sc, struct pci_attach_args *pa)
                 IORegistryEntry::getRegistryRoot()->setProperty("AwTXEvents", live);
                 live->release();
             }
+#endif
             ic->ic_opmode = IEEE80211_M_MONITOR;
             task_set(&awdlRxTaskEntry, awdlRxTask, sc, "awdlRxTask");
             timeout_set(&awdlRxTimer, awdlRxTimeout, sc);

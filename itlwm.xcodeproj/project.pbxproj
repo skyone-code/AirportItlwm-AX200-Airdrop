@@ -4212,6 +4212,7 @@
 					"__IO80211_TARGET=__MAC_26_0",
 					__PRIVATE_SPI__,
 					IO80211FAMILY_V2,
+					"ITL_TELEMETRY=1",
 				);
 				INFOPLIST_FILE = "AirportItlwm/WCL/Info.plist";
 				LIBRARY_SEARCH_PATHS = (
@@ -4283,6 +4284,7 @@
 					__PRIVATE_SPI__,
 					"$(inherited)",
 					IO80211FAMILY_V2,
+					"ITL_TELEMETRY=0",
 				);
 				INFOPLIST_FILE = "AirportItlwm/WCL/Info.plist";
 				LIBRARY_SEARCH_PATHS = (
