@@ -178,6 +178,10 @@ struct AwdlCoexBaSlot {
     // Promiscuous-RX probes this slot was actually granted. Non-zero proves the slot reached the receive
     // filter instead of asking into a closed window.
     uint32_t probeStarts = 0;
+    // Last granted probe. Answers only ever arrive inside the probe's narrowed window (iface172: 40 asks
+    // a round went unanswered, both answers landed 2-11 ms after a probe), so the probe cadence IS the
+    // answer cadence. This timestamp paces retries instead of the one-shot-per-dialog flag it replaced.
+    uint64_t lastProbeUS = 0;
     uint32_t txSubmitErrors = 0, rxIdleTeardowns = 0, delbas = 0, txDelbas = 0, txPeerAdds = 0;
     int delbaWaitTid = -1, delbaWaitGen = -1, delbaTries = 0;
     uint32_t delbaWaitEpoch = 0, delbaConfirmed = 0, delbaForced = 0;
@@ -201,6 +205,11 @@ struct AwdlCoexBaSlot {
     // per-batch test never fired. These accumulate over the HE episode and are cleared with it.
     uint32_t heWinTxed = 0, heWinDone = 0;
     bool heDemoted = false;
+    // This peer station's own HE context. Without it the firmware builds no HE PPDU for the station,
+    // whatever the peer sends us: peerHeUS proves the peer can receive HE, never that we can send it.
+    // heCtxtErr carries the firmware's answer, 0 meaning the context was built.
+    bool heCtxtReady = false;
+    int heCtxtErr = 0;
 };
 static AwdlCoexBaSlot awdlCoexBaSlots[kAwdlCoexBaMaxPeers];
 // Slot-0 aliases: the historical single-peer code keeps its original names and reads slot 0. The
@@ -4862,11 +4871,10 @@ iwx_mac_ctxt_task(void *arg)
     }
     
     err = that->iwx_config_he_sta(sc, &in->in_ni);
-    if (err) {
-        XYLog("HE context update failed: %d\n", err);
-        splx(s);
-        return;
-    }
+    if (err)
+        // Refused HE context is not a reason to skip the MAC context update this task exists
+        // for; carry on without HE (the node's HE flags were already dropped in iwx_update_sta).
+        XYLog("HE context update failed: %d (continuing without HE)\n", err);
     err = that->iwx_mac_ctxt_cmd(sc, in, IWX_FW_CTXT_ACTION_MODIFY, 1);
     if (err) {
         printf("%s: failed to update MAC\n", DEVNAME(sc));
@@ -6435,8 +6443,13 @@ static void awdlCoexRateWindowJudge(void)
 // acked. A second watchdog covers the firmware that never completes fixed-rate frames at all:
 // 8 frames with no notifs since the first, 1 s in, demotes here (the notifs watchdog can't run then).
 static bool awdlCoexHeTxOff, awdlCoexVhtFixedOff;
+// -itlawdlcoexhelegacy: the pre-2026-11-22 rule, where a peer that had sent HE frames was enough to
+// put our own aggregates at a fixed HE rate. The default now also requires that station's HE context,
+// because without it the firmware cannot build the PPDU and the queue never drains.
+static bool awdlCoexHeCtxtBypass;
 static uint32_t awdlCoexHeTxMcs = 7, awdlCoexHeTxDemotes, awdlCoexVhtFixedMcs = 8;
 static uint32_t awdlCoexVhtFixedFrames;
+static uint32_t awdlCoexHeCtxtBuilt, awdlCoexHeCtxtFails;
 
 // Pure predicate: no side effects. The TX call site runs after the watchdog marks are armed, and a
 // mark-wiping side effect here would refresh them every frame and neuter the no-completion watchdog
@@ -6444,7 +6457,7 @@ static uint32_t awdlCoexVhtFixedFrames;
 static bool awdlCoexHeTxWantedSlot(unsigned slot)
 {
     auto &s = awdlCoexBaSlots[slot];
-    return !awdlCoexHeTxOff && !s.heDemoted &&
+    return !awdlCoexHeTxOff && !s.heDemoted && (awdlCoexHeCtxtBypass || s.heCtxtReady) &&
         s.peerHeUS && awdlUptimeUS() - s.peerHeUS < 60000000ULL;
 }
 
@@ -6972,6 +6985,12 @@ static void awdlCoexPublish()
                     root->setProperty(key, s.rxFramesHanded, 32);
                     snprintf(key, sizeof(key), "AwCoexBa%uHeTx", baSlot);
                     root->setProperty(key, awdlCoexHeTxWantedSlot(baSlot));
+                    // Whether this station's own HE context exists, and the firmware's answer to it. A slot
+                    // with HeCtxt 0 and HeTx 0 is the fixed state; HeCtxtErr carries the reason.
+                    snprintf(key, sizeof(key), "AwCoexBa%uHeCtxt", baSlot);
+                    root->setProperty(key, s.heCtxtReady);
+                    snprintf(key, sizeof(key), "AwCoexBa%uHeCtxtErr", baSlot);
+                    root->setProperty(key, uint32_t(s.heCtxtErr), 32);
                     snprintf(key, sizeof(key), "AwCoexBa%uPeerHe", baSlot);
                     root->setProperty(key, s.peerHeUS && awdlUptimeUS() - s.peerHeUS < 60000000ULL);
                     snprintf(key, sizeof(key), "AwCoexBa%uPeerHeFrames", baSlot);
@@ -7121,6 +7140,9 @@ static void awdlCoexPublish()
             root->setProperty("AwCoexBaRefillEnabled", awdlCoexBaRefillEnabled);
             root->setProperty("AwCoexHeTxMcs", awdlCoexHeTxMcs, 32);
             root->setProperty("AwCoexHeTxDemotes", awdlCoexHeTxDemotes, 32);
+            root->setProperty("AwCoexHeCtxtBuilt", awdlCoexHeCtxtBuilt, 32);
+            root->setProperty("AwCoexHeCtxtFails", awdlCoexHeCtxtFails, 32);
+            root->setProperty("AwCoexHeCtxtLegacy", awdlCoexHeCtxtBypass);
             root->setProperty("AwCoexBaRefillKicks", awdlCoexBaRefillKicks, 32);
             root->setProperty("AwCoexBaEmptyWithReady", awdlCoexBaEmptyWithReady, 32);
             root->setProperty("AwCoexBaEmptyNoReady", awdlCoexBaEmptyNoReady, 32);
@@ -8850,6 +8872,8 @@ awdlCoexBaSlotRemovePeer(struct iwx_softc *sc, unsigned slot)
     s.heStartUS = 0;
     s.heWinTxed = 0;
     s.heWinDone = 0;
+    s.heCtxtReady = false;
+    s.heCtxtErr = 0;
     int flushErr = 0;
     if (txQueue >= 0)
         flushErr = iwx_flush_sta_tids(sc, kAwdlBaStationIds[slot], 0xffff);
@@ -8946,6 +8970,18 @@ awdlCoexBaSlotAddPeer(struct iwx_softc *sc, unsigned slot, const uint8_t *peer)
     memcpy(s.peer, peer, sizeof(s.peer));
     s.requestsPending.keepPeer(peer);
     s.peerLastUS = awdlUptimeUS();
+    // The HE sub-context hangs off this station, not off the listener's MAC context. peerHeUS only
+    // says the peer can receive HE; without IWX_STA_HE_CTXT_CMD for this sta_id the firmware builds
+    // no HE PPDU for it, and the fixed-rate HE branch then stalls its own queue (TxNotifs stuck at 0).
+    // Only armed when HE is advertised this boot, so a default build keeps the pre-fix path exactly.
+    s.heCtxtErr = iwx_config_he_sta_self(sc, kAwdlBaStationIds[slot]);
+    s.heCtxtReady = s.heCtxtErr == 0;
+    if (gen != sc->sc_generation)
+        return ECANCELED;
+    if (s.heCtxtReady)
+        ++awdlCoexHeCtxtBuilt;
+    else if (s.heCtxtErr != EOPNOTSUPP)
+        ++awdlCoexHeCtxtFails;
     return 0;
 }
 
@@ -9388,6 +9424,12 @@ awdlCoexBaHandleSlot(struct iwx_softc *sc, unsigned slot)
         const bool canProbe = receiveSession && !recentRxPayload && askingSlot < kAwdlCoexBaMaxPeers;
         if (!canProbe)
             awdlCoexBaProbeUntilUS = 0;
+        // Ramp fix (iface172): the one-shot-per-dialog probe made the answer cadence one per ask round --
+        // a full round of 40 asks at ~500 ms plus the rest was 20-45 s of 24 Mbit/s singles before each
+        // 250 ms window where the reply could actually land. Every granted probe answered within 11 ms,
+        // so pace probes at 800 ms instead: the agreement then forms within the first second of bulk,
+        // not after a round of starving singles. The one-shot flag also froze a slot out entirely when
+        // the peer's presence long outlived the dialog that first probed it.
         if (canProbe && !awdlCoexBaProbeTried[askingSlot] && awdlCoexBaFilterOff &&
             answerNow >= awdlCoexTxPauseUntilUS &&
             answerNow - as.txLastAskUS >= 200000ULL &&
@@ -9395,8 +9437,23 @@ awdlCoexBaHandleSlot(struct iwx_softc *sc, unsigned slot)
             // Test reply delivery with promiscuous RX briefly open, once per dialog and per slot.
             awdlCoexBaProbeTried[askingSlot] = true;
             ++as.probeStarts;
+            as.lastProbeUS = answerNow;
             awdlCoexBaProbeUntilUS = answerNow + 250000ULL;
             awdlCoexBaEvent('P', as.txToken, as.txAsks, askingSlot);
+        }
+        const bool canProbeAgain = canProbe && awdlCoexBaProbeTried[askingSlot] &&
+            answerNow - as.lastProbeUS >= 800000ULL;
+        if (canProbeAgain && awdlCoexBaFilterOff &&
+            answerNow >= awdlCoexTxPauseUntilUS &&
+            answerNow - as.txLastAskUS >= 200000ULL &&
+            !(awdlCoexScheduleCurrent() && awdlCoexPeerSchedule.shouldPause(answerNow))) {
+            // The one-shot window has already fired this dialog and the peer is still silent with bulk
+            // data waiting: re-open the narrow window every 800 ms. Same evidence gate as the first
+            // probe -- the answer never lands outside one.
+            ++as.probeStarts;
+            as.lastProbeUS = answerNow;
+            awdlCoexBaProbeUntilUS = answerNow + 250000ULL;
+            awdlCoexBaEvent('P', as.txToken, as.txAsks, askingSlot | 0x100);
         }
         const bool wantOff = receiveSession && answerNow >= awdlCoexBaProbeUntilUS;
         if (wantOff != awdlCoexBaFilterOff) {
@@ -14307,8 +14364,14 @@ iwx_umac_scan_fill_channels(struct iwx_softc *sc,
     uint8_t nchan;
     /* A join request asked for one scan of its BSS channel only.  Never let a
      * stale value trim a scan that nothing asked to restrict: the request flag
-     * is what makes the channel current. */
+     * is what makes the channel current. The flag itself lives in the WCL layer,
+     * which the plain itlwm target does not build; there the scan is never
+     * restricted, which is what a target without WCL joining means anyway. */
+#ifdef AIRPORT_WCL
     uint8_t join_chan = (bgscan || !ic->ic_wcl_join_requested) ? 0 : ic->ic_join_chan;
+#else
+    uint8_t join_chan = 0;
+#endif
     
     if (!bgscan)
         ic->ic_join_chan = 0;
@@ -16117,21 +16180,28 @@ iwx_he_ppe_value(const uint8_t *ppe, unsigned bit)
 }
 
 static void
-iwx_build_he_sta(const struct ieee80211_node *ni, struct iwx_he_sta_context_cmd *cmd)
+iwx_build_he_sta(const struct ieee80211_node *ni, const struct ieee80211com *ic,
+                 uint8_t sta_id, struct iwx_he_sta_context_cmd *cmd)
 {
     memset(cmd, 0, sizeof(*cmd));
-    cmd->sta_id = IWX_STATION_ID;
+    cmd->sta_id = sta_id;
     cmd->tid_limit = 1; /* single TID aggregation */
     uint32_t flags = IWX_HE_NIC_NOT_ACK_ENABLED;
-    uint32_t op = ni->ni_he_oper_params;
+    // A listener peer has no node of its own: its capabilities are ours (the peer already proved it
+    // receives HE by sending us HE frames), and AWDL has no BSS colour to negotiate.
+    uint32_t op = ni ? ni->ni_he_oper_params : 0;
+    const uint8_t *mac = ni ? ni->ni_he_cap_elem.mac_cap_info : ic->ic_he_cap_elem.mac_cap_info;
+    const uint8_t *phy = ni ? ni->ni_he_cap_elem.phy_cap_info : ic->ic_he_cap_elem.phy_cap_info;
+    const uint8_t *ppe = ni ? ni->ni_ppe_thres : ic->ic_ppe_thres;
     cmd->bss_color = (op >> 24) & 0x3f;
+    if (!ni)
+        flags |= IWX_HE_BSS_COLOR_DIS;
     if (op & IEEE80211_HE_OPERATION_BSS_COLOR_DISABLED)
         flags |= IWX_HE_BSS_COLOR_DIS;
     if (op & IEEE80211_HE_OPERATION_PARTIAL_BSS_COLOR)
         flags |= IWX_HE_PARTIAL_BSS_COLOR;
     cmd->htc_trig_based_pkt_ext = op & 7;
     cmd->frame_time_rts_th = htole16((op >> 4) & 0x3ff);
-    const uint8_t *mac = ni->ni_he_cap_elem.mac_cap_info;
     uint32_t htc = (mac[0] & IEEE80211_HE_MAC_CAP0_HTC_HE) ? 1 : 0;
     if (mac[2] & IEEE80211_HE_MAC_CAP2_BSR) htc |= 1U << 4;
     if (mac[3] & IEEE80211_HE_MAC_CAP3_OMI_CONTROL) htc |= 1U << 5;
@@ -16140,21 +16210,21 @@ iwx_build_he_sta(const struct ieee80211_node *ni, struct iwx_he_sta_context_cmd 
     if (mac[2] & IEEE80211_HE_MAC_CAP2_32BIT_BA_BITMAP) flags |= IWX_HE_32BIT_BA_BITMAP;
     if (mac[2] & IEEE80211_HE_MAC_CAP2_ACK_EN) flags |= IWX_HE_ACK_ENABLED;
     memset(cmd->pkt_ext, 7, sizeof(cmd->pkt_ext));
-    if (ni->ni_he_cap_elem.phy_cap_info[6] & IEEE80211_HE_PHY_CAP6_PPE_THRESHOLD_PRESENT) {
-        unsigned nss = (ni->ni_ppe_thres[0] & 7) + 1;
-        unsigned mask = (ni->ni_ppe_thres[0] >> 3) & 15;
+    if (phy[6] & IEEE80211_HE_PHY_CAP6_PPE_THRESHOLD_PRESENT) {
+        unsigned nss = (ppe[0] & 7) + 1;
+        unsigned mask = (ppe[0] >> 3) & 15;
         unsigned bit = 7;
         for (unsigned ss = 0; ss < nss && ss < 2; ss++) {
             for (unsigned bw = 0; bw < 4; bw++) {
                 if (!(mask & (1U << bw))) continue;
-                cmd->pkt_ext[ss][bw][1] = iwx_he_ppe_value(ni->ni_ppe_thres, bit);
-                cmd->pkt_ext[ss][bw][0] = iwx_he_ppe_value(ni->ni_ppe_thres, bit + 3);
+                cmd->pkt_ext[ss][bw][1] = iwx_he_ppe_value(ppe, bit);
+                cmd->pkt_ext[ss][bw][0] = iwx_he_ppe_value(ppe, bit + 3);
                 bit += 6;
             }
         }
         flags |= IWX_HE_PACKET_EXT;
     } else {
-        unsigned padding = (ni->ni_he_cap_elem.phy_cap_info[9] >> 6) & 3;
+        unsigned padding = (phy[9] >> 6) & 3;
         if (padding != 3) {
             for (unsigned ss = 0; ss < 2; ss++)
                 for (unsigned bw = 0; bw < 4; bw++) {
@@ -16164,7 +16234,7 @@ iwx_build_he_sta(const struct ieee80211_node *ni, struct iwx_he_sta_context_cmd 
             flags |= IWX_HE_PACKET_EXT;
         }
     }
-    if (ni->ni_flags & IEEE80211_NODE_HE_MU_EDCA) {
+    if (ni && (ni->ni_flags & IEEE80211_NODE_HE_MU_EDCA)) {
         flags |= IWX_HE_MU_EDCA_CW;
         for (unsigned ac = 0; ac < 4; ac++) {
             const uint8_t *rec = ni->ni_he_mu_edca + 1 + 3 * ac;
@@ -16192,11 +16262,36 @@ iwx_config_he_sta(struct iwx_softc *sc, struct ieee80211_node *ni)
     uint8_t ver = iwx_lookup_cmd_ver(sc, IWX_DATA_PATH_GROUP, IWX_STA_HE_CTXT_CMD);
     if (ver != 1 && ver != 2)
         return EOPNOTSUPP;
-    iwx_build_he_sta(ni, &cmd);
+    iwx_build_he_sta(ni, &sc->sc_ic, IWX_STATION_ID, &cmd);
     int err = iwx_send_cmd_pdu(sc, iwx_cmd_id(IWX_STA_HE_CTXT_CMD, IWX_DATA_PATH_GROUP, 0),
         0, ver == 1 ? 80 : sizeof(cmd), &cmd);
     XYLog("HE context: version=%u color=%u flags=%08x result=%d\n",
         ver, cmd.bss_color, le32toh(cmd.flags), err);
+    return err;
+}
+
+// The HE context of one of the listener's peer stations. There is no node to read capabilities from,
+// so ours stand in: that peer already proved it receives HE by sending us HE frames, and the fixed HE
+// rate this driver asks for (MCS 7, two streams, 4xLTF/0.8us) sits inside every HE device's mandatory
+// set. Returns the firmware's answer; nonzero means no HE PPDU can be built for that station.
+int ItlIwx::
+iwx_config_he_sta_self(struct iwx_softc *sc, uint8_t sta_id)
+{
+    struct ieee80211com *ic = &sc->sc_ic;
+    // Only meaningful when HE was advertised this boot: otherwise ic_he_cap_elem is all zeroes and the
+    // context would describe a device that cannot do HE at all.
+    if (!(ic->ic_flags & IEEE80211_F_HEON))
+        return EOPNOTSUPP;
+    uint8_t ver = iwx_lookup_cmd_ver(sc, IWX_DATA_PATH_GROUP, IWX_STA_HE_CTXT_CMD);
+    if (ver != 1 && ver != 2)
+        return EOPNOTSUPP;
+    struct iwx_he_sta_context_cmd cmd;
+    static_assert(sizeof(cmd) == 88, "HE context v2 ABI");
+    iwx_build_he_sta(nullptr, ic, sta_id, &cmd);
+    int err = iwx_send_cmd_pdu(sc, iwx_cmd_id(IWX_STA_HE_CTXT_CMD, IWX_DATA_PATH_GROUP, 0),
+        0, ver == 1 ? 80 : sizeof(cmd), &cmd);
+    XYLog("HE context self: sta=%u version=%u color=%u flags=%08x result=%d\n",
+        sta_id, ver, cmd.bss_color, le32toh(cmd.flags), err);
     return err;
 }
 
@@ -16891,8 +16986,17 @@ iwx_run(struct iwx_softc *sc)
     }
     
     err = iwx_config_he_sta(sc, &in->in_ni);
-    if (err)
-        return err;
+    if (err) {
+        // A refused BSS HE context must not kill the association: rate scaling and the AWDL
+        // coex listener arm below, and both are needed without HE. Drop the node's HE flags so
+        // rate control stays off HE. (2026-11-22: with -itlwm_he=1 on an AP whose HE operation
+        // IE is incomplete this aborted here, skipping rs_init and leaving the coex listener
+        // unarmed — AirDrop then ran with zero AWDL coex state.)
+        XYLog("%s: BSS HE context refused (error %d), continuing without HE\n",
+              DEVNAME(sc), err);
+        in->in_ni.ni_flags &= ~(IEEE80211_NODE_HE | IEEE80211_NODE_HECAP |
+                                IEEE80211_NODE_HEOP);
+    }
     err = iwx_rs_init(sc, in, true);
     if (err) {
         XYLog("%s: could not update rate scaling (error %d)\n",
@@ -22258,6 +22362,9 @@ iwx_attach(struct iwx_softc *sc, struct pci_attach_args *pa)
         awdlCoexLowLatency = false;
         awdlCoexOrder = !PE_parse_boot_argn("-itlawdlcoexnoorder", &dummy, sizeof(dummy));
         awdlCoexHeTxOff = PE_parse_boot_argn("-itlawdlcoexnohe", &dummy, sizeof(dummy));
+        // -itlawdlcoexhelegacy: keep the old rule (a peer that sent HE frames was enough). The default
+        // now also demands the station's HE context, which only exists when -itlwm_he=1 is set.
+        awdlCoexHeCtxtBypass = PE_parse_boot_argn("-itlawdlcoexhelegacy", &dummy, sizeof(dummy));
         awdlCoexVhtFixedOff = PE_parse_boot_argn("-itlawdlcoexnovht", &dummy, sizeof(dummy));
         uint32_t requestedHeMcs = 0;
         if (PE_parse_boot_argn("itlawdlcoexhemcs", &requestedHeMcs, sizeof(requestedHeMcs)) && requestedHeMcs <= 11)
