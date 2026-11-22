@@ -1184,20 +1184,29 @@ PluginConfiguration ADDPR(config) {
 // Match Xcode's kext lifecycle. The kernel runs C++ initializers; libkmod forwards the start/stop
 // callbacks through _realmain and _antimain.
 extern "C" {
-extern kern_return_t _start(kmod_info_t *, void *);
-extern kern_return_t _stop(kmod_info_t *, void *);
 extern kern_return_t IntelBTPatcher_kern_start(kmod_info_t *, void *);
 extern kern_return_t IntelBTPatcher_kern_stop(kmod_info_t *, void *);
+}
+
 #ifdef IBTP_XCODE_KEXT_INFO
 // Xcode's kernel-extension target emits _kmod_info (name and version from the MODULE_NAME /
-// MODULE_VERSION build settings), so only the entry points are left here.
+// MODULE_VERSION build settings) and compiles it as C++ (clang -x c++), so the `extern
+// kern_return_t _start/_stop` it declares mangle as C++. These definitions must mangle
+// identically: inside extern "C" they produce plain C symbols that nothing resolves, kmod_info.start
+// stays dangling, the start callback never runs, and the Lilu plugin never registers
+// (2026-11-22 Bluetooth outage, Xcode 26.5).
 kern_return_t _start(kmod_info_t *ki, void *data) { return IntelBTPatcher_kern_start(ki, data); }
 kern_return_t _stop(kmod_info_t *ki, void *data) { return IntelBTPatcher_kern_stop(ki, data); }
 #else
+extern "C" {
+// Plain-clang fallback: _start/_stop are libkmod's c_start.o/c_stop.o, which forward to
+// _realmain/_antimain below; the references here must stay plain C.
+extern kern_return_t _start(kmod_info_t *, void *);
+extern kern_return_t _stop(kmod_info_t *, void *);
 // The kmod name must equal CFBundleIdentifier in the built Info.plist.
 __attribute__((visibility("default"))) KMOD_EXPLICIT_DECL(com.zxystd.IntelBTPatcher, "2.4.2", _start, _stop)
 __attribute__((visibility("hidden"))) kmod_start_func_t *_realmain = IntelBTPatcher_kern_start;
 __attribute__((visibility("hidden"))) kmod_stop_func_t *_antimain = IntelBTPatcher_kern_stop;
 __attribute__((visibility("hidden"))) int _kext_apple_cc = __APPLE_CC__;
-#endif
 }
+#endif
