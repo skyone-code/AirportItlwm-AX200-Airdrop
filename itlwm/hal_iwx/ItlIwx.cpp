@@ -204,7 +204,11 @@ struct AwdlCoexBaSlot {
     // Cumulative marks for the ack watchdog: a single TID batch can be far smaller than 16 frames, so the
     // per-batch test never fired. These accumulate over the HE episode and are cleared with it.
     uint32_t heWinTxed = 0, heWinDone = 0;
+    // The HE flavour hit the no-completion watchdog. Only the HE flavour: VHT is a different rate
+    // word and stays available (see awdlCoexFixedRateSlot).
     bool heDemoted = false;
+    // The VHT flavour hit the same watchdog. Only then is fixed rate off for this station entirely.
+    bool fixedOff = false;
     // This peer station's own HE context. Without it the firmware builds no HE PPDU for the station,
     // whatever the peer sends us: peerHeUS proves the peer can receive HE, never that we can send it.
     // heCtxtErr carries the firmware's answer, 0 meaning the context was built.
@@ -330,6 +334,10 @@ static bool awdlCoexData; // -itlawdlcoexdata
 static bool awdlCoexBaTxEnabled, awdlCoexBaPeerPauseEnabled;
 static uint32_t awdlCoexAdvertise80Frames;
 static uint64_t awdlCoexMovePendingUS, awdlCoexCountryRetryUS;
+// #90: the poll that does not depend on the firmware volunteering a notice.
+static uint32_t awdlCoexCountryPolls, awdlCoexCountryPollFinds, awdlCoexCountryPollLast;
+static uint64_t awdlCoexCountryPollNextUS;
+static bool awdlCoexCountryPollOff;
 static uint32_t awdlCoexMoveDrainTimeouts, awdlCoexCountryFailures;
 static int awdlPhyBuildingId = -1;
 // A PHY command for the listener's context that failed without a readable answer leaves it uncertain;
@@ -4685,18 +4693,35 @@ iwx_setup_he_rates(struct iwx_softc *sc)
     memset(&ic->ic_he_mcs_nss_supp, 0xff, sizeof(ic->ic_he_mcs_nss_supp));
     memset(ic->ic_ppe_thres, 0, sizeof(ic->ic_ppe_thres));
     uint8_t version = iwx_lookup_cmd_ver(sc, IWX_DATA_PATH_GROUP, IWX_STA_HE_CTXT_CMD);
+    /* Which of the four conditions below refused HE, as a bitmask, so a boot can be
+     * diagnosed from the registry alone (the driver cannot print to the system log).
+     * 1 = NVM says the SKU has no 11ax, 2 = -itlwm_he was not seen, 4 = -novht,
+     * 8 = the firmware exposes no usable v1/v2 HE context, 16 = no antenna chains. */
+    uint32_t heGate = 0;
+    if (!sc->sc_nvm.sku_cap_11ax_enable)
+        heGate |= 1;
+    if (!(ic->ic_userflags & IEEE80211_F_HEON))
+        heGate |= 2;
+    if (ic->ic_userflags & IEEE80211_F_NOVHT)
+        heGate |= 4;
+    if (version != 1 && version != 2)
+        heGate |= 8;
+    ITL_DIAG_SET(IORegistryEntry::getRegistryRoot(), "ItlwmHeGate", uint64_t(heGate), 32);
+    ITL_DIAG_SET(IORegistryEntry::getRegistryRoot(), "ItlwmHeVer", uint64_t(version), 32);
+    ITL_DIAG_SET(IORegistryEntry::getRegistryRoot(), "ItlwmHeUserFlags", uint64_t(ic->ic_userflags), 32);
+    ITL_DIAG_SET(IORegistryEntry::getRegistryRoot(), "ItlwmHeFlags", uint64_t(ic->ic_flags), 32);
     /* Preinit builds modecaps before media_init enables HT. Requiring HTON
      * here would omit 11ax from the initial capability table permanently.
      * Negotiation still requires HT and QoS on the associated node. */
-    if (!sc->sc_nvm.sku_cap_11ax_enable ||
-        !(ic->ic_userflags & IEEE80211_F_HEON) ||
-        (ic->ic_userflags & IEEE80211_F_NOVHT) ||
-        (version != 1 && version != 2))
+    if (heGate != 0)
         return;
     unsigned rx = iwx_num_of_ant(iwx_fw_valid_rx_ant(sc));
     unsigned tx = iwx_num_of_ant(iwx_fw_valid_tx_ant(sc));
-    if (!rx || !tx)
+    ITL_DIAG_SET(IORegistryEntry::getRegistryRoot(), "ItlwmHeAnt", uint64_t(rx) | (uint64_t(tx) << 8), 32);
+    if (!rx || !tx) {
+        ITL_DIAG_SET(IORegistryEntry::getRegistryRoot(), "ItlwmHeGate", uint64_t(16), 32);
         return;
+    }
     if (!iwx_mimo_enabled(sc))
         rx = tx = 1;
     /* Conservative station profile: no TWT, OMI, multi-TID or fragmentation. */
@@ -4724,6 +4749,8 @@ iwx_setup_he_rates(struct iwx_softc *sc)
         ic->ic_he_mcs_nss_supp.tx_mcs_160 = ic->ic_he_mcs_nss_supp.tx_mcs_80;
     }
     ic->ic_flags |= IEEE80211_F_HEON;
+    ITL_DIAG_SET(IORegistryEntry::getRegistryRoot(), "ItlwmHeGate", uint64_t(0), 32);
+    ITL_DIAG_SET(IORegistryEntry::getRegistryRoot(), "ItlwmHeFlags", uint64_t(ic->ic_flags), 32);
     XYLog("Experimental HE enabled: context-v%u rx80=%04x tx80=%04x width-bits=%02x\n",
         version, le16toh(ic->ic_he_mcs_nss_supp.rx_mcs_80),
         le16toh(ic->ic_he_mcs_nss_supp.tx_mcs_80), ic->ic_he_cap_elem.phy_cap_info[0]);
@@ -6001,9 +6028,136 @@ static bool awdlRxChannel6;
 static bool awdlWant149;
 static unsigned awdlFixedChannel = 6;
 static char awdlCountry[3] = "ZZ";
-static int awdlBtCoexRequest = -1;
+// #92: the firmware used to be told to favour Wi-Fi with no Bluetooth priority features, so a busy
+// Wi-Fi link could cut Bluetooth audio. The default is now the shared mode Linux asks for, with
+// Bluetooth calls and audio prioritised, and the module set that carries the multi-priority table.
+// -itlawdlbtcoex=N still picks another mode (3 = the old Wi-Fi-first behaviour).
+static int awdlBtCoexRequest = IWX_BT_COEX_NW;
 unsigned itlAWDLFixedChannel() { return awdlFixedChannel; }
 static bool awdlSyncProbe;
+// The AWDL slot plan (see awdlSchedTick). Declared here because awdlCoexPublish, which reports it,
+// sits above the tick that fills it in.
+constexpr unsigned kAwdlSchedSlots = 16;
+static uint64_t awdlUptimeUS();
+static bool awdlSchedOn;
+static uint64_t awdlSchedEpochUS;
+// The plan as the native callback delivered it (TU). The vendor ioctl path writes ic_awdl_*;
+// Tahoe's peer manager goes through the native protocol callback, which never crosses that ioctl,
+// so these are the values the follower falls back to when ic has none.
+static uint16_t awdlSchedPlanAwTU, awdlSchedPlanPeriodTU, awdlSchedPlanExtTU, awdlSchedPlanSyncTU;
+static uint32_t awdlSchedSlot, awdlSchedTicks, awdlSchedPresentTicks, awdlSchedSlotChanges;
+static uint32_t awdlSchedAwUS, awdlSchedPeriodUS, awdlSchedSlotUS;
+static bool awdlSchedFollows;
+// Lifecycle guard rails for everything that acts on the plan (0.7-equivalent, independently
+// implemented): act only once the listener context has been up for a few seconds, stand down when
+// macOS takes the plan away, and re-anchor after a firmware restart. The tick cadence is the coex
+// cycle (seconds), so the gate is approximate -- good enough for "stable", not for timing.
+static bool awdlSchedReady;
+static uint64_t awdlSchedStableSinceUS;
+static uint32_t awdlSchedGenSeen;
+static uint32_t awdlSchedRestarts, awdlSchedStops, awdlSchedWindowEdges;
+static bool awdlSchedInWin;
+// One-shot timer that lands on plan slot boundaries. Only session protection needs slot precision
+// (the coex cycle runs on a seconds cadence); sync and multicast gating read the phase directly.
+static CTimeout *awdlSchedTimer;
+static struct task awdlSchedTaskEntry;
+// Per-slot session protection (the P2P-device session-protection idea, pointed at our own listener
+// context). It is a firmware command, so it gets its own opt-in flag on top of -itlawdlsched.
+static bool awdlSchedProtOn;
+static uint32_t awdlSchedProtLeadMS = 12;
+static bool awdlSchedProtActive;
+static uint32_t awdlSchedProtArmed, awdlSchedProtEnded, awdlSchedProtFails, awdlSchedProtLastErr;
+// Circuit breaker: the firmware refusing session protection over and over (measured: EAGAIN,
+// every window, on a LISTENER context) must not turn the per-window command into a storm.
+// After five straight refusals the protection stops for the rest of the generation; a firmware
+// restart clears it and lets the next generation try again.
+static uint32_t awdlSchedProtFailStreak;
+static int awdlSchedProtBlockedGen = -1;
+// Same idea for the hop: a move that lands where the context already sits is a no-op, not a move.
+static uint32_t awdlSchedHopNoop;
+// Plan-follower hopping (0.7-equivalent, step one): with -itlawdlhop, the listener's PHY context
+// moves to the channel macOS named (AWDL_MASTER_CHANNEL, or -itlawdlhopchan=N) before each
+// protected window and back to the channel the listener was added on after it. Same-band moves
+// are a PHY MODIFY; a band change drops the binding first, as 0.7 does. Rate tables, BA filters
+// and the peer cache were built for the fixed channel, so a window on another channel is exactly
+// what the hop counters are for.
+static bool awdlSchedHopOn;
+static bool awdlSchedHopSlot;
+static uint8_t awdlSchedHopChanArg, awdlSchedHopIoctlChan;
+static uint8_t awdlSchedHopChan;   // what the PHY context moved to last, 0 = unknown/failed
+static uint32_t awdlSchedHopMoves, awdlSchedHopReturns, awdlSchedHopFails, awdlSchedHopBackFails;
+// macOS's own channel sequence, decoded from the native template's channel-sequence TLV. Recorded
+// only: acting on it needs the second (channel-6) context and real slot hopping, which do not exist.
+static uint8_t awdlSchedPlanFlags[kAwdlSchedSlots];
+static uint8_t awdlSchedPlanChan[kAwdlSchedSlots];
+static bool awdlSchedPlanValid;
+static uint32_t awdlSchedPlanSeen;
+// macOS's own decoded channel sequence (the chan-seq ioctl), one channel per slot. A zero
+// means the slot is not an AWDL slot on macOS's clock - the listener stays home in it.
+static uint8_t awdlSchedNativeChan[kAwdlSchedSlots];
+static bool awdlSchedNativeChanValid;
+// Window gating counters for the sync and multicast paths.
+static uint32_t awdlSchedSyncHeld, awdlSchedSyncSent, awdlSchedMcastHeld;
+
+// Exported so the AirDrop writer side can gate its own frames on the same window the driver follows
+// without exposing the plan's internals. Follows() is the "the plan is running and trusted" answer;
+// InWindow() is only meaningful while Follows() is true.
+bool itlAWDLSchedFollows()
+{
+    return awdlSchedReady && awdlSchedFollows;
+}
+
+bool itlAWDLSchedInWindow()
+{
+    if (!awdlSchedReady || !awdlSchedFollows || !awdlSchedEpochUS || !awdlSchedPeriodUS)
+        return false;
+    return (awdlUptimeUS() - awdlSchedEpochUS) % awdlSchedPeriodUS < awdlSchedAwUS;
+}
+
+// macOS's own channel sequence, handed over from the native template's channel-sequence TLV. Recorded
+// for the plan telemetry only: nothing acts on it until the second context and real hopping exist.
+void itlAWDLSchedNotePlanSeq(const uint8_t *entries, unsigned slots)
+{
+    if (!entries || slots != kAwdlSchedSlots)
+        return;
+    for (unsigned planSlot = 0; planSlot < slots; ++planSlot) {
+        awdlSchedPlanFlags[planSlot] = entries[2 * planSlot];
+        awdlSchedPlanChan[planSlot] = entries[2 * planSlot + 1];
+    }
+    awdlSchedPlanValid = true;
+    ++awdlSchedPlanSeen;
+}
+
+// The hop target the peer manager named through AWDL_MASTER_CHANNEL. 0 clears it;
+// -itlawdlhopchan overrides it.
+void itlAWDLSchedNoteHop(unsigned channel)
+{
+    awdlSchedHopIoctlChan = channel && channel < 256 ? uint8_t(channel) : 0;
+}
+
+// The four plan numbers, delivered from the native protocol callback path (which never crosses
+// the vendor ioctl that writes ic_awdl_*). The follower reads ic first and these second.
+void itlAWDLSchedNoteSyncParams(unsigned awLength, unsigned awPeriod, unsigned extLength, unsigned syncPeriod)
+{
+    awdlSchedPlanAwTU = uint16_t(awLength > 0xffff ? 0xffff : awLength);
+    awdlSchedPlanPeriodTU = uint16_t(awPeriod > 0xffff ? 0xffff : awPeriod);
+    awdlSchedPlanExtTU = uint16_t(extLength > 0xffff ? 0xffff : extLength);
+    awdlSchedPlanSyncTU = uint16_t(syncPeriod > 0xffff ? 0xffff : syncPeriod);
+}
+
+// macOS's decoded channel sequence, one channel per slot; 0 marks a non-AWDL slot. Pushed by
+// the frame writer every time the peer manager re-sends the sequence. Replaces the master
+// channel as the hop target while -itlawdlhopslot is on.
+void itlAWDLSchedNoteNativeSlots(const uint8_t *channels)
+{
+    if (!channels) {
+        awdlSchedNativeChanValid = false;
+        return;
+    }
+    for (unsigned i = 0; i < kAwdlSchedSlots; ++i)
+        awdlSchedNativeChan[i] = channels[i];
+    awdlSchedNativeChanValid = true;
+}
 static bool awdlSyncTrain;
 static bool awdlFastProbe;
 static bool awdlPeerTrain;
@@ -6018,7 +6172,6 @@ static Aw::PeerProbe awdlPeerProbes[8];
 static unsigned awdlPeerProbeCount;
 static Aw::AirCounts awdlAir;
 static uint32_t awdlPeerTLVs[256];
-static uint64_t awdlUptimeUS();
 // When TLV 2, services, changes in our frames and in the peer's, to time a lookup.
 static Aw::ServiceSnapshotLog awdlServiceLog;
 // -itlawdlmcastuc: each group data frame also goes to the last peer heard, as unicast, so it gets an
@@ -6233,6 +6386,10 @@ static uint32_t awdlCoexFilter = 1;
 // itlawdlcoexcycle=N: with the probe, the listener goes off and on every N seconds while associated,
 // so Wi-Fi throughput can be compared with and without it on one boot. 0, the default, keeps it on.
 static uint32_t awdlCoexCycleSecs, awdlCoexCycleFlips;
+// True only when the old experiment flag itlawdlcoexcycle=N set its own cadence. The default 1 s
+// assembly exists for the plan follower's tick alone: the cycle's listener flip is the experiment's
+// whole point, and running it every second would tear AWDL down every second.
+static bool awdlCoexCycleExperiment;
 // -itlawdlcoexrx: with the probe and -itlawdliface, AWDL action frames the listener hears go to
 // macOS's awdl0, as in monitor mode, so peers can be discovered while Wi-Fi stays up. Receive only.
 static bool awdlCoexRx;
@@ -6345,6 +6502,9 @@ static bool awdlCoexNoSharedBa;
 // firmware's answer can drop to its world code and come back to the same country, and clearing the hints
 // each time sent the listener back to channel 6. Hints are now cleared only for a different usable country.
 static uint16_t awdlCoexHintCountry;
+// #83: how many listener-peer rate tables had a 160 MHz column inherited from the router's node
+// before it was emptied. Non-zero means the old code would have sent those rates to the firmware.
+static uint32_t awdlBaTlcWideCleared;
 static uint32_t awdlCoexCountryUnusableAnswers, awdlCoexHintClears;
 // The phone's latest 16-slot channel sequence (TLV 18), for diagnosis only (#24, #21): which channels it
 // spends its slots on. The parser follows PR #21 (zheznanohana). Nothing in the driver acts on it yet.
@@ -6433,12 +6593,15 @@ static void awdlCoexRateWindowJudge(void)
 // frames acked while the transfer ran, and the phone's own sends to us ran one to two MCS higher).
 // Two fixed-rate flavours share one machinery and one set of watchdogs:
 //  - HE: the peer has been sending us HE frames (within 60 s). -itlawdlcoexnohe disables;
-//    itlawdlcoexhemcs=N picks the MCS (default 7).
+//    -itlawdlcoexhemcs=N picks the MCS (default 11 = the top of the 2SS ladder, 1024-QAM),
+//    -itlawdlcoexhegltf=N the 3-bit GI/LTF field (default 4 = 4x LTF / 0.8 us guard).
 //  - VHT: no HE evidence needed, the link is 80 MHz and the slot has an agreed BA session. This is
 //    the default flavour (MCS 8, two streams, 80 MHz); -itlawdlcoexnovht disables and
-//    itlawdlcoexvhtmcs=N picks the MCS. MCS 9 exists but a first batch that fails outright costs
+//    -itlawdlcoexvhtmcs=N picks the MCS. MCS 9 exists but a first batch that fails outright costs
 //    the whole episode -- the HE experiment measured exactly that -- so 8 is the default and 9 is
 //    one boot-arg away for whoever wants to measure it.
+// All four are value arguments, so all four must be looked up *with* the leading '-': the parser
+// compares the caller's name against the boot arg token including its dash.
 // The BA notifications watchdog demotes a slot back to rate control after three rounds below 75%
 // acked. A second watchdog covers the firmware that never completes fixed-rate frames at all:
 // 8 frames with no notifs since the first, 1 s in, demotes here (the notifs watchdog can't run then).
@@ -6447,9 +6610,23 @@ static bool awdlCoexHeTxOff, awdlCoexVhtFixedOff;
 // put our own aggregates at a fixed HE rate. The default now also requires that station's HE context,
 // because without it the firmware cannot build the PPDU and the queue never drains.
 static bool awdlCoexHeCtxtBypass;
-static uint32_t awdlCoexHeTxMcs = 7, awdlCoexHeTxDemotes, awdlCoexVhtFixedMcs = 8;
+// Top of the HE 2SS ladder, not the mandatory floor: MCS 11 at 2 streams / 80 MHz is 1024-QAM 5/6,
+// about 1201 Mbit/s. The mandatory-set argument that justified 7 no longer holds -- 7 is 600 Mbit/s,
+// below what firmware rate control already reaches on its own at VHT MCS 9 (867 Mbit/s), so the HE
+// flavour could not win even when it worked. -itlawdlcoexhemcs=N lowers it without a rebuild.
+static uint32_t awdlCoexHeTxMcs = 11, awdlCoexHeTxDemotes, awdlCoexVhtFixedMcs = 9;
 static uint32_t awdlCoexVhtFixedFrames;
+static uint32_t awdlCoexVhtFixedDemotes;
 static uint32_t awdlCoexHeCtxtBuilt, awdlCoexHeCtxtFails;
+// The GI/LTF field of the fixed HE rate word. 4 is IWX_RATE_MCS_HE_SU_4_LTF_08_GI (4x LTF, 0.8 us
+// guard); 0 would mean 1x LTF, which is not a legal combination for two streams. -itlawdlcoexhegltf=N
+// sweeps it: "the firmware completes no fixed HE frame" and "this GI/LTF value is wrong for this
+// firmware" are indistinguishable from the outside, and a 3-bit field has only eight candidates.
+static uint32_t awdlCoexHeGltf = IWX_RATE_MCS_HE_SU_4_LTF_08_GI;
+// The exact rate word of the last fixed HE frame handed to the firmware. The BA notification's
+// tx_rate is the firmware's own report and carries extra bits, so it cannot be used to check what we
+// actually asked for.
+static uint32_t awdlCoexHeRateWord;
 
 // Pure predicate: no side effects. The TX call site runs after the watchdog marks are armed, and a
 // mark-wiping side effect here would refresh them every frame and neuter the no-completion watchdog
@@ -6465,18 +6642,36 @@ static bool awdlCoexHeTxWantedSlot(unsigned slot)
 // no-completion watchdog lives here so both flavours are covered: a firmware that never completes
 // the fixed rate must not keep the queue hostage. heOut reports the flavour chosen, so the TX
 // call site does not have to re-evaluate awdlCoexHeTxWantedSlot (another clock read) per frame.
+//
+// The demotion is per flavour. 2026-11-23, Mac -> phone: the HE flavour sent exactly 8 fixed-rate
+// frames, txNotifs stayed 0, and the old single `heDemoted` flag then refused every flavour for the
+// rest of the session -- 450k frames rode firmware rate control at VHT MCS9 2SS 80 MHz (143 Mbit/s).
+// The two flavours are different rate words; only one of them had failed. -itlawdlcoexnohe likewise
+// now removes the HE flavour only: it used to take the VHT one down with it, which is not what the
+// flag's name says and made every HE A/B measurement also an accidental VHT-off run.
 static bool awdlCoexFixedRateSlot(unsigned slot, bool *heOut = nullptr)
 {
     auto &s = awdlCoexBaSlots[slot];
-    if (awdlCoexHeTxOff || s.heDemoted)
+    if (s.fixedOff)
         return false;
     if (s.heStartUS && awdlUptimeUS() - s.heStartUS > 1000000ULL &&
         s.heTxFrames - s.heStartHeFrames >= 8 && s.txNotifs == s.heStartNotifs) {
-        s.heDemoted = true;
-        ++awdlCoexHeTxDemotes;
-        return false;
+        // Only the flavour the armed marks belong to is demoted.
+        if (s.heStartFixedHe) {
+            s.heDemoted = true;
+            ++awdlCoexHeTxDemotes;
+        } else {
+            s.fixedOff = true;
+            ++awdlCoexVhtFixedDemotes;
+        }
+        // The marks described the episode that just failed. Zeroing them makes the next fixed-rate
+        // frame arm a fresh episode for whatever flavour is picked from here on.
+        s.heStartUS = 0;
+        s.heStartFixedHe = false;
+        if (s.fixedOff)
+            return false;
     }
-    if (awdlCoexHeTxWantedSlot(slot)) {
+    if (!s.heDemoted && awdlCoexHeTxWantedSlot(slot)) {
         if (heOut)
             *heOut = true;
         return true;
@@ -6518,6 +6713,10 @@ static uint32_t awdlCoexMgmtOK, awdlCoexMgmtFailed;
 static uint32_t awdlCoexBaTxAskRounds;
 // Asking stops once nothing has gone to or come from the peer for this long and no bulk send runs: after a
 // transfer the rounds went on for minutes (#24). Data to or from it starts a fresh round.
+// #90: how often a connected station with no known country asks the firmware for its current
+// one. Linux polls its own domain the same way; 30 s is the interval the notice path already
+// treats as "new enough" (Aw::kMccEchoIntervalSeconds).
+constexpr uint64_t kAwdlCoexCountryPollUS = 30000000;
 constexpr uint64_t kAwdlCoexBaIdleAskUS = 30000000;
 // Yield: a slot whose peer has stopped sending while another peer is backing up hands its station over at
 // once. Measured without this, a finished transfer left the station idle for 91 s while the second peer was
@@ -6866,6 +7065,10 @@ static void awdlCoexPublish()
     root->setProperty("AwCoexAddsAfterRemove", awdlCoexAddsAfterRemove, 32);
     root->setProperty("AwCoexAddsAfterRestart", awdlCoexAddsAfterRestart, 32);
     root->setProperty("AwCoexFirmwareGeneration", uint32_t(awdlCoexGeneration), 32);
+    root->setProperty("AwCoexBaTlcWideCleared", awdlBaTlcWideCleared, 32);
+    root->setProperty("AwCoexCountryPolls", awdlCoexCountryPolls, 32);
+    root->setProperty("AwCoexCountryPollFinds", awdlCoexCountryPollFinds, 32);
+    root->setProperty("AwCoexCountryPollLast", awdlCoexCountryPollLast, 32);
     root->setProperty("AwCoexCountryUnusableAnswers", awdlCoexCountryUnusableAnswers, 32);
     root->setProperty("AwCoexHintClears", awdlCoexHintClears, 32);
     root->setProperty("AwCoexBaAsksShared", awdlCoexBaAsksShared, 32);
@@ -6991,6 +7194,13 @@ static void awdlCoexPublish()
                     root->setProperty(key, s.heCtxtReady);
                     snprintf(key, sizeof(key), "AwCoexBa%uHeCtxtErr", baSlot);
                     root->setProperty(key, uint32_t(s.heCtxtErr), 32);
+                    // Which flavour was demoted away from fixed rate, if any. Two separate keys
+                    // because the two demotions mean different things: HeDemoted only removes the
+                    // HE flavour, FixedOff means no fixed rate at all for this station.
+                    snprintf(key, sizeof(key), "AwCoexBa%uHeDemoted", baSlot);
+                    root->setProperty(key, s.heDemoted);
+                    snprintf(key, sizeof(key), "AwCoexBa%uFixedOff", baSlot);
+                    root->setProperty(key, s.fixedOff);
                     snprintf(key, sizeof(key), "AwCoexBa%uPeerHe", baSlot);
                     root->setProperty(key, s.peerHeUS && awdlUptimeUS() - s.peerHeUS < 60000000ULL);
                     snprintf(key, sizeof(key), "AwCoexBa%uPeerHeFrames", baSlot);
@@ -7140,6 +7350,62 @@ static void awdlCoexPublish()
             root->setProperty("AwCoexBaRefillEnabled", awdlCoexBaRefillEnabled);
             root->setProperty("AwCoexHeTxMcs", awdlCoexHeTxMcs, 32);
             root->setProperty("AwCoexHeTxDemotes", awdlCoexHeTxDemotes, 32);
+            root->setProperty("AwCoexVhtFixedDemotes", awdlCoexVhtFixedDemotes, 32);
+            root->setProperty("AwCoexHeGltf", awdlCoexHeGltf, 32);
+            root->setProperty("AwCoexHeRateWord", awdlCoexHeRateWord, 32);
+            // The slot plan and whether it is macOS's or ours. Follows=No with SchedOn=Yes means
+            // macOS has not handed down an availability plan yet (its AWDL sync params are zero).
+            root->setProperty("AwSchedOn", awdlSchedOn);
+            root->setProperty("AwSchedFollows", awdlSchedFollows);
+            root->setProperty("AwSchedAwUS", awdlSchedAwUS, 32);
+            root->setProperty("AwSchedPeriodUS", awdlSchedPeriodUS, 32);
+            root->setProperty("AwSchedSlotUS", awdlSchedSlotUS, 32);
+            root->setProperty("AwSchedSlot", awdlSchedSlot, 32);
+            root->setProperty("AwSchedSlotChanges", awdlSchedSlotChanges, 32);
+            root->setProperty("AwSchedTicks", awdlSchedTicks, 32);
+            root->setProperty("AwSchedPresentTicks", awdlSchedPresentTicks, 32);
+            // Lifecycle and window state of the plan follower. Ready=No with Follows=Yes means the
+            // 3 s stability gate has not passed yet; Restarts counts firmware restarts the follower
+            // recovered from; Stops counts times macOS paused AWDL under it.
+            root->setProperty("AwSchedReady", awdlSchedReady);
+            root->setProperty("AwSchedInWindow", awdlSchedInWin);
+            root->setProperty("AwSchedWindowEdges", awdlSchedWindowEdges, 32);
+            root->setProperty("AwSchedRestarts", awdlSchedRestarts, 32);
+            root->setProperty("AwSchedStops", awdlSchedStops, 32);
+            root->setProperty("AwSchedSyncHeld", awdlSchedSyncHeld, 32);
+            root->setProperty("AwSchedSyncSent", awdlSchedSyncSent, 32);
+            root->setProperty("AwSchedMcastHeld", awdlSchedMcastHeld, 32);
+            root->setProperty("AwSchedProtOn", awdlSchedProtOn);
+            root->setProperty("AwSchedProtActive", awdlSchedProtActive);
+            root->setProperty("AwSchedProtArmed", awdlSchedProtArmed, 32);
+            root->setProperty("AwSchedProtEnded", awdlSchedProtEnded, 32);
+            root->setProperty("AwSchedProtFails", awdlSchedProtFails, 32);
+            root->setProperty("AwSchedProtLastErr", awdlSchedProtLastErr, 32);
+            root->setProperty("AwSchedProtLead", awdlSchedProtLeadMS, 32);
+            root->setProperty("AwSchedHopOn", awdlSchedHopOn);
+            root->setProperty("AwSchedHopSlot", awdlSchedHopSlot);
+            root->setProperty("AwSchedNativeChanValid", awdlSchedNativeChanValid);
+            root->setProperty("AwSchedHopChan", awdlSchedHopChan, 32);
+            root->setProperty("AwSchedHopMoves", awdlSchedHopMoves, 32);
+            root->setProperty("AwSchedHopReturns", awdlSchedHopReturns, 32);
+            root->setProperty("AwSchedHopFails", awdlSchedHopFails, 32);
+            root->setProperty("AwSchedHopBackFails", awdlSchedHopBackFails, 32);
+            root->setProperty("AwSchedHopNoop", awdlSchedHopNoop, 32);
+            root->setProperty("AwSchedProtFailStreak", awdlSchedProtFailStreak, 32);
+            // macOS's channel sequence, decoded but not followed yet. 32 bytes: flags,channel pairs.
+            root->setProperty("AwSchedPlanValid", awdlSchedPlanValid);
+            root->setProperty("AwSchedPlanSeen", awdlSchedPlanSeen, 32);
+            if (awdlSchedPlanSeen) {
+                uint8_t planSeq[kAwdlSchedSlots * 2];
+                for (unsigned planSlot = 0; planSlot < kAwdlSchedSlots; ++planSlot) {
+                    planSeq[2 * planSlot] = awdlSchedPlanFlags[planSlot];
+                    planSeq[2 * planSlot + 1] = awdlSchedPlanChan[planSlot];
+                }
+                if (auto *planData = OSData::withBytes(planSeq, sizeof(planSeq))) {
+                    root->setProperty("AwSchedPlanSeq", planData);
+                    planData->release();
+                }
+            }
             root->setProperty("AwCoexHeCtxtBuilt", awdlCoexHeCtxtBuilt, 32);
             root->setProperty("AwCoexHeCtxtFails", awdlCoexHeCtxtFails, 32);
             root->setProperty("AwCoexHeCtxtLegacy", awdlCoexHeCtxtBypass);
@@ -7957,9 +8223,326 @@ awdlRxTimeout(void *arg)
         task_add(systq, &awdlRxTaskEntry);
 }
 
-void ItlIwx::
-awdlCoexCycleTimeout(void *arg)
+// ---- AWDL slot plan: follow macOS's own AirDrop plan -------------------------------------------
+// macOS hands its availability plan down through APPLE80211_IOC_AWDL_SYNC_PARAMS (ic_awdl_*), and
+// its own Wi-Fi driver runs exactly that plan; every Apple peer then schedules its sends into the
+// windows we announce. This driver used to ignore those numbers and pick periods of its own, which
+// is why the only schedule it could describe was sixteen identical always-present slots.
+// -itlawdlsched turns the plan on. Two consumers, one flag:
+//   * the slot clock below, which maps "now" onto one of kAwdlSchedSlots windows and publishes which
+//     one we are in. Transmit is NOT gated on it, so a wrong clock costs telemetry, not traffic.
+//   * the AirDrop writer, which reads ic_awdl_follow_plan and emits macOS's numbers in its sync frame
+//     instead of our own 16/110 constants (AwLocalSchedule.hpp, applyRequestedTiming).
+// Peers see the second one, so a bad plan does cost the link. That is what the flag is for: without it
+// nothing changes, and with it the numbers are macOS's, not ours.
+
+static void awdlSchedTick(struct iwx_softc *sc, struct ieee80211com *ic)
 {
+    // The AirDrop writer side reads this through the controller to decide whether to emit macOS's
+    // numbers or our own constants, so it has to be visible even when the plan is off.
+    ic->ic_awdl_follow_plan = awdlSchedOn;
+    if (!awdlSchedOn)
+        return;
+    // Firmware restart: the epoch is anchored in firmware-relative uptime and the listener context is
+    // gone, so the plan loses its anchor even though macOS changed nothing. The plan fields survive
+    // the restart, so the follower re-arms itself once the listener is back (the native side recovers
+    // the same way).
+    if (awdlSchedGenSeen && awdlSchedGenSeen != sc->sc_generation) {
+        ++awdlSchedRestarts;
+        awdlSchedGenSeen = 0;
+        awdlSchedReady = false;
+        awdlSchedStableSinceUS = 0;
+        awdlSchedEpochUS = 0;
+        awdlSchedInWin = false;
+        awdlSchedProtActive = false;
+        awdlSchedProtFailStreak = 0;
+        if (awdlSchedTimer)
+            timeout_del(&awdlSchedTimer);
+    }
+    // The listener context is the stability signal: it exists exactly while this generation is
+    // actually serving AWDL. While it is down (macOS paused AirDrop) the gate closes but the plan is
+    // kept -- re-anchoring the epoch would shift phase for nothing.
+    if (!(awdlCoexAdded && awdlCoexGeneration == (int)sc->sc_generation && !awdlStopping)) {
+        if (awdlSchedReady || awdlSchedStableSinceUS) {
+            ++awdlSchedStops;
+            awdlSchedReady = false;
+            awdlSchedStableSinceUS = 0;
+            awdlSchedInWin = false;
+            awdlSchedProtActive = false;
+            if (awdlSchedTimer)
+                timeout_del(&awdlSchedTimer);
+        }
+        return;
+    }
+    if (!awdlSchedGenSeen)
+        awdlSchedGenSeen = sc->sc_generation;
+    // macOS's plan is in TU; 1024 us each. Zero means it has not asked for one yet. The native
+    // callback path leaves ic at zero and hands the numbers over through the note function above.
+    const uint32_t awUS = uint32_t(ic->ic_awdl_aw_length ? ic->ic_awdl_aw_length : awdlSchedPlanAwTU) * 1024U;
+    const uint32_t periodUS = uint32_t(ic->ic_awdl_aw_period ? ic->ic_awdl_aw_period : awdlSchedPlanPeriodTU) * 1024U;
+    awdlSchedAwUS = awUS;
+    awdlSchedPeriodUS = periodUS;
+    awdlSchedSlotUS = periodUS / kAwdlSchedSlots;
+    awdlSchedFollows = awUS != 0 && awdlSchedSlotUS != 0;
+    if (!awdlSchedFollows)
+        return;
+    const uint64_t nowUS = awdlUptimeUS();
+    if (!awdlSchedEpochUS) {
+        awdlSchedEpochUS = nowUS;
+        return;
+    }
+    const uint64_t phaseUS = (nowUS - awdlSchedEpochUS) % periodUS;
+    const uint32_t slot = uint32_t(phaseUS / awdlSchedSlotUS);
+    if (slot != awdlSchedSlot) {
+        awdlSchedSlot = slot;
+        ++awdlSchedSlotChanges;
+    }
+    ++awdlSchedTicks;
+    const bool inWin = phaseUS < awUS;
+    if (inWin != awdlSchedInWin) {
+        awdlSchedInWin = inWin;
+        ++awdlSchedWindowEdges;
+    }
+    if (inWin)
+        ++awdlSchedPresentTicks;
+    // The 3 s stability gate. Only after it passes does anything besides counting act on the plan.
+    if (!awdlSchedReady) {
+        if (!awdlSchedStableSinceUS)
+            awdlSchedStableSinceUS = nowUS;
+        else if (nowUS - awdlSchedStableSinceUS > 3000000ULL)
+            awdlSchedReady = true;
+    }
+    // The slot-boundary timer self-re-arms; this just revives it if something stopped it. Two
+    // stands-down: a firmware that refuses protection (the breaker above), and a plan whose
+    // window fills the whole period -- "always present" has no window edges, and arming the
+    // timer on one produced a 16 ms command storm that killed every Wi-Fi association attempt
+    // (measured: 22 refusals, the radio dropping on each Ready). macOS sends such a plan when
+    // AirDrop is idle; the follower keeps following it for the sync frames and leaves the
+    // firmware alone.
+    if (awdlSchedReady && awdlSchedProtOn && awdlSchedProtBlockedGen != sc->sc_generation &&
+        awdlSchedProtFailStreak < 5 && awUS < periodUS && !timeout_pending(&awdlSchedTimer))
+        timeout_add_msec(&awdlSchedTimer, 1);
+}
+
+// ---- plan slot-boundary timer (session protection only) ------------------------------------------
+// The coex cycle runs on a seconds cadence, far too coarse for 65 ms slots. This one-shot timer lands
+// on the plan's boundaries instead: lead microseconds before a window opens, and at its end. The
+// session protection goes to our own listener MAC context -- the same firmware primitive the native
+// side drives from a P2P-device context, pointed at the context we actually serve AWDL with.
+
+void ItlIwx::
+awdlSchedProtSend(struct iwx_softc *sc, uint32_t durationMS)
+{
+    struct iwx_session_prot_cmd cmd = {
+        .id_and_color = htole32(IWX_FW_CMD_ID_AND_COLOR(kAwdlCoexMacId, 0)),
+        .action = htole32(IWX_FW_CTXT_ACTION_ADD),
+        .duration_tu = htole32(durationMS * IEEE80211_DUR_TU),
+    };
+    cmd.conf_id = IWX_SESSION_PROTECT_CONF_ASSOC;
+    ++awdlSchedProtArmed;
+    ItlIwx *that = container_of(sc, ItlIwx, com);
+    const int err = that->iwx_send_cmd_pdu(sc, iwx_cmd_id(IWX_SESSION_PROTECTION_CMD, IWX_MAC_CONF_GROUP, 0),
+                                     0, sizeof(cmd), &cmd);
+    if (err) {
+        ++awdlSchedProtFails;
+        awdlSchedProtLastErr = uint32_t(err);
+        if (++awdlSchedProtFailStreak >= 5)
+            awdlSchedProtBlockedGen = sc->sc_generation;
+        XYLog("awdlSched: SESSION_PROTECTION failed %d (duration %d ms, streak %d)\n", err, durationMS,
+              awdlSchedProtFailStreak);
+    } else {
+        awdlSchedProtFailStreak = 0;
+        awdlSchedProtActive = true;
+    }
+}
+
+void ItlIwx::
+awdlSchedProtStop(struct iwx_softc *sc)
+{
+    if (!awdlSchedProtActive)
+        return;
+    struct iwx_session_prot_cmd cmd = {
+        .id_and_color = htole32(IWX_FW_CMD_ID_AND_COLOR(kAwdlCoexMacId, 0)),
+        .action = htole32(IWX_FW_CTXT_ACTION_REMOVE),
+        .conf_id = IWX_SESSION_PROTECT_CONF_ASSOC,
+    };
+    ++awdlSchedProtEnded;
+    awdlSchedProtActive = false;
+    ItlIwx *that = container_of(sc, ItlIwx, com);
+    (void)that->iwx_send_cmd_pdu(sc, iwx_cmd_id(IWX_SESSION_PROTECTION_CMD, IWX_MAC_CONF_GROUP, 0),
+                           0, sizeof(cmd), &cmd);
+}
+
+// One PHY move of the listener's own context. Same-band goes by MODIFY; a band change drops the
+// binding first, moves the context, and rebinds (the 0.7 sequence). The context is 20 MHz wide:
+// the hop target is a 2.4 GHz channel more often than not, and awdlCoexPhyWidth pins that.
+int ItlIwx::
+awdlSchedHopPhy(struct iwx_softc *sc, struct ieee80211_channel *target)
+{
+    ItlIwx *that = container_of(sc, ItlIwx, com);
+    struct iwx_phy_ctxt *own = &sc->sc_phyctxt[kAwdlCoexPhyId];
+    if (!own->channel || !target || !target->ic_freq)
+        return EINVAL;
+    if (own->channel == target)
+        return EALREADY;   // nothing to move; the caller counts this apart from a real move
+    struct iwx_binding_cmd bind;
+    uint32_t status = 0;
+    int err = 0;
+    const uint16_t bands = IEEE80211_CHAN_2GHZ | IEEE80211_CHAN_5GHZ;
+    const bool bandChange = (own->channel->ic_flags & bands) != (target->ic_flags & bands);
+    if (bandChange) {
+        // A binding must not straddle a PHY REMOVE: drop it, move, rebind.
+        memset(&bind, 0, sizeof(bind));
+        bind.id_and_color = htole32(IWX_FW_CMD_ID_AND_COLOR(own->id, own->color));
+        bind.action = htole32(IWX_FW_CTXT_ACTION_REMOVE);
+        bind.phy = htole32(IWX_FW_CMD_ID_AND_COLOR(own->id, own->color));
+        for (int i = 0; i < IWX_MAX_MACS_IN_BINDING; i++)
+            bind.macs[i] = htole32(IWX_FW_CTXT_INVALID);
+        err = that->iwx_send_cmd_pdu_status(sc, IWX_BINDING_CONTEXT_CMD, sizeof(bind), &bind, &status);
+        if (!err && status)
+            err = EIO;
+        if (err)
+            return err;
+    }
+    struct ieee80211_channel *before = own->channel;
+    own->channel = target;
+    awdlCoexPhyWidth = IWX_PHY_VHT_CHANNEL_MODE20;
+    err = that->iwx_phy_ctxt_cmd(sc, own, 1, 1,
+                           bandChange ? IWX_FW_CTXT_ACTION_ADD : IWX_FW_CTXT_ACTION_MODIFY, 0);
+    awdlCoexPhyWidth = -1;
+    if (err) {
+        // The firmware refused the move and applied nothing; the next move rewrites this anyway.
+        own->channel = before;
+        return err;
+    }
+    if (bandChange) {
+        memset(&bind, 0, sizeof(bind));
+        bind.id_and_color = htole32(IWX_FW_CMD_ID_AND_COLOR(own->id, own->color));
+        bind.action = htole32(IWX_FW_CTXT_ACTION_ADD);
+        bind.phy = htole32(IWX_FW_CMD_ID_AND_COLOR(own->id, own->color));
+        bind.macs[0] = htole32(IWX_FW_CMD_ID_AND_COLOR(kAwdlCoexMacId, 0));
+        bind.lmac_id = htole32(IEEE80211_IS_CHAN_2GHZ(target) ? IWX_LMAC_24G_INDEX : IWX_LMAC_5G_INDEX);
+        err = that->iwx_send_cmd_pdu_status(sc, IWX_BINDING_CONTEXT_CMD, sizeof(bind), &bind, &status);
+        if (!err && status)
+            err = EIO;
+    }
+    return err;
+}
+
+// Move the listener's PHY onto the window's channel and back. With -itlawdlhopslot the target
+// is macOS's channel-sequence channel for the slot the window opens in (a zero slot stays home);
+// otherwise it is AWDL_MASTER_CHANNEL, unless -itlawdlhopchan overrides. The home is where the
+// listener was added. A refused move is a counter, never a broken listener: the protection still
+// runs, just on the channel the context already sits on.
+void ItlIwx::
+awdlSchedHopWindow(struct iwx_softc *sc, bool into, uint64_t atUS)
+{
+    if (!awdlSchedHopOn || !awdlCoexAdded || !awdlCoexOwnChan)
+        return;
+    struct ieee80211com *ic = &sc->sc_ic;
+    if (into) {
+        uint8_t chan = 0;
+        if (awdlSchedHopSlot && awdlSchedNativeChanValid && awdlSchedEpochUS && awdlSchedSlotUS) {
+            const uint64_t slot = atUS >= awdlSchedEpochUS ?
+                ((atUS - awdlSchedEpochUS) / awdlSchedSlotUS) % kAwdlSchedSlots : 0;
+            chan = awdlSchedNativeChan[slot];
+            if (!chan) {
+                // macOS says this slot is not an AWDL slot on its clock: go home and stay there.
+                const int back = awdlSchedHopPhy(sc, awdlCoexOwnChan);
+                if (back == 0) {
+                    awdlSchedHopChan = 0;
+                    ++awdlSchedHopReturns;
+                } else if (back != EALREADY)
+                    ++awdlSchedHopBackFails;
+                return;
+            }
+        } else {
+            chan = awdlSchedHopChanArg ? awdlSchedHopChanArg : awdlSchedHopIoctlChan;
+        }
+        if (!chan || chan >= nitems(ic->ic_channels))
+            return;
+        const struct ieee80211_channel &c = ic->ic_channels[chan];
+        if (!c.ic_freq || !isset(ic->ic_chan_active, chan))
+            return;
+        const int err = awdlSchedHopPhy(sc, &ic->ic_channels[chan]);
+        if (err == EALREADY)
+            ++awdlSchedHopNoop;   // the context already sits there: nothing moved
+        else if (err) {
+            awdlSchedHopChan = 0;
+            ++awdlSchedHopFails;
+        } else {
+            awdlSchedHopChan = chan;
+            ++awdlSchedHopMoves;
+        }
+    } else {
+        const int err = awdlSchedHopPhy(sc, awdlCoexOwnChan);
+        if (err == 0)
+            awdlSchedHopChan = 0;
+        if (err == EALREADY)
+            ++awdlSchedHopNoop;   // never left home, so there is no return to count
+        else if (err)
+            ++awdlSchedHopBackFails;
+        else
+            ++awdlSchedHopReturns;
+    }
+}
+
+void ItlIwx::
+awdlSchedSlotTimeout(void *arg)
+{
+    if (!awdlStopping)
+        task_add(systq, &awdlSchedTaskEntry);
+}
+
+void ItlIwx::
+awdlSchedSlotTask(void *arg)
+{
+    struct iwx_softc *sc = (struct iwx_softc *)arg;
+    ItlIwx *that = container_of(sc, ItlIwx, com);
+    if (!that->getMainWorkLoop()->inGate()) {
+        that->getMainCommandGate()->runAction(
+            [](OSObject *, void *arg0, void *, void *, void *) -> IOReturn {
+                awdlSchedSlotTask(arg0);
+                return kIOReturnSuccess;
+            }, arg);
+        return;
+    }
+    if (awdlStopping || !awdlSchedReady || !awdlSchedFollows || !awdlSchedProtOn ||
+        !awdlSchedEpochUS || !awdlSchedPeriodUS ||
+        awdlSchedProtBlockedGen == sc->sc_generation || awdlSchedProtFailStreak >= 5 ||
+        awdlSchedAwUS >= awdlSchedPeriodUS) {
+        awdlSchedProtActive = false;
+        return;
+    }
+    const uint64_t phaseUS = (awdlUptimeUS() - awdlSchedEpochUS) % awdlSchedPeriodUS;
+    const uint64_t leadUS = uint64_t(awdlSchedProtLeadMS) * 1000ULL;
+    if (phaseUS + leadUS >= awdlSchedPeriodUS) {
+        // Lead microseconds before the next window opens: move onto the window's channel, protect
+        // it, then fire again at its end.
+        const uint64_t toStart = awdlSchedPeriodUS - phaseUS;
+        awdlSchedHopWindow(sc, true, awdlUptimeUS() + toStart);
+        awdlSchedProtSend(sc, uint32_t((toStart + awdlSchedAwUS) / 1000ULL));
+        timeout_add_usec(&awdlSchedTimer, int(toStart + awdlSchedAwUS));
+        return;
+    }
+    if (phaseUS < awdlSchedAwUS) {
+        // Inside the window. Protection should already be running; if the timer started late, cover
+        // what is left of the window instead of leaving it unprotected. The PHY is not moved here:
+        // the window-open path owns the move.
+        if (!awdlSchedProtActive)
+            awdlSchedProtSend(sc, uint32_t((awdlSchedAwUS - phaseUS) / 1000ULL) + awdlSchedProtLeadMS);
+        timeout_add_usec(&awdlSchedTimer, int(awdlSchedAwUS - phaseUS));
+        return;
+    }
+    // Between windows: nothing must be protected and the listener goes home. Next firing sits
+    // lead microseconds before the following window.
+    awdlSchedProtStop(sc);
+    awdlSchedHopWindow(sc, false, awdlUptimeUS());
+    timeout_add_usec(&awdlSchedTimer, int(awdlSchedPeriodUS - phaseUS - leadUS));
+}
+
+void ItlIwx::
+awdlCoexCycleTimeout(void *arg){
     if (!awdlStopping)
         task_add(systq, &awdlCoexTaskEntry);
 }
@@ -7980,7 +8563,14 @@ awdlCoexCycleTask(void *arg)
     if (awdlStopping)
         return;
     struct ieee80211com *ic = &sc->sc_ic;
-    if ((IC2IFP(ic)->if_flags & IFF_RUNNING) && ic->ic_state == IEEE80211_S_RUN &&
+    awdlSchedTick(sc, ic);
+    // Publish every second: the tick and hop counters only reach ioreg through this, and the
+    // event-driven publishes alone would leave them frozen between events.
+    awdlCoexPublish();
+    // The listener flip is the old cycle experiment's measurement, not a heartbeat: only the
+    // experiment flag's own assembly runs it. The default tick must never tear the listener down.
+    if (awdlCoexCycleExperiment &&
+        (IC2IFP(ic)->if_flags & IFF_RUNNING) && ic->ic_state == IEEE80211_S_RUN &&
         !(sc->sc_flags & (IWX_FLAG_HW_ERR | IWX_FLAG_SHUTDOWN | IWX_FLAG_RFKILL))) {
         awdlCoexWant = !awdlCoexWant;
         ++awdlCoexCycleFlips;
@@ -8266,10 +8856,12 @@ static void awdlStopTimers()
     timeout_free(&awdlCoexBootTimer);
     timeout_free(&awdlCoexScanHoldTimer);
     timeout_free(&awdlRxTimer);
+    timeout_free(&awdlSchedTimer);
     task_del(systq, &awdlCoexTxTaskEntry);
     task_del(systq, &awdlCoexTaskEntry);
     task_del(systq, &awdlCoexBootTaskEntry);
     task_del(systq, &awdlRxTaskEntry);
+    task_del(systq, &awdlSchedTaskEntry);
 }
 
 void ItlIwx::
@@ -8315,6 +8907,12 @@ awdlCoexTxTask(void *arg)
         (!Aw::countryNoticeUsable(awdlCoexCountryNotice, awdlCoexCountrySource) ||
          Aw::mccEchoDue(awdlCoexCountryAnswers != 0, mccUptimeSeconds(), awdlCoexCountryAnswerSeconds)))
         that->awdlCoexCountryAnswer(sc);
+    // #90: no notice has arrived, so ask for the current country instead of waiting for one that may
+    // never come. Only while the station is up and the country is still unknown; a poll that finds one
+    // loads it as a pending notice and the line above applies it on the next beat.
+    if (running && !awdlCoexCountryPollOff && !awdlCoexCountryLearned &&
+        awdlUptimeUS() >= awdlCoexCountryPollNextUS)
+        that->awdlCoexCountryPoll(sc);
     if ((running || awdlSelfLink) && !awdlStopping && awdlCoexAdded && awdlCoexGeneration == sc->sc_generation)
         that->awdlCoexRetarget(sc);
     if ((running || awdlSelfLink) && awdlCoexAdded && awdlCoexGeneration == sc->sc_generation) {
@@ -8868,6 +9466,7 @@ awdlCoexBaSlotRemovePeer(struct iwx_softc *sc, unsigned slot)
     }
     s.peerHeUS = 0;
     s.heDemoted = false;
+    s.fixedOff = false;
     s.hePoorAcks = 0;
     s.heStartUS = 0;
     s.heWinTxed = 0;
@@ -8904,12 +9503,20 @@ awdlCoexBaSlotRemovePeer(struct iwx_softc *sc, unsigned slot)
 
 // The width the peer station and its rate control use: the listener's own context's with it, the station's
 // when the listener shares the station's binding (80 MHz for a 5 GHz station at 80 or 160 MHz, else 20).
+// ⛔ An unassociated station has no binding to follow. AWDL is then Mac <-> phone only, on the listener's
+// own PHY context and the listener's own channel; no router is involved and ic_bss carries nothing worth
+// reading. The old fallback returned 20 MHz for that case, so an unassociated listener built a 20 MHz
+// station and a 20 MHz rate word while the link was demonstrably 80 MHz wide.
 static int awdlCoexBaWidth(struct ieee80211com *ic)
 {
-    if (awdlCoexMultiActive)
-        return awdlCoexOwnWidth;
     const struct ieee80211_node *ni = ic->ic_bss;
-    if (!ni || !ni->ni_chan || IEEE80211_IS_CHAN_2GHZ(ni->ni_chan))
+    // "Associated" needs a real STA context: the isolated AWDL listener runs in monitor mode with no
+    // BSS of its own, and ic_bss then carries no channel.
+    const bool associated = ic->ic_opmode != IEEE80211_M_MONITOR && ic->ic_state == IEEE80211_S_RUN &&
+        ni && ni->ni_chan;
+    if (awdlCoexMultiActive || !associated)
+        return awdlCoexOwnWidth > 0 ? awdlCoexOwnWidth : 20;
+    if (IEEE80211_IS_CHAN_2GHZ(ni->ni_chan))
         return 20;
     return ni->ni_chw == IEEE80211_CHAN_WIDTH_80 || ni->ni_chw == IEEE80211_CHAN_WIDTH_160 ? 80 : 20;
 }
@@ -8951,6 +9558,7 @@ awdlCoexBaSlotAddPeer(struct iwx_softc *sc, unsigned slot, const uint8_t *peer)
     ++s.peerEpoch;
     s.peerHeUS = 0;
     s.heDemoted = false;
+    s.fixedOff = false;
     s.hePoorAcks = 0;
     s.heStartUS = 0;
     s.heWinTxed = 0;
@@ -9137,6 +9745,12 @@ awdlCoexBaHandleSlot(struct iwx_softc *sc, unsigned slot)
         s.answerLength = 0;
         s.txState = kCoexBaTxOff;
         s.txQueue = -1;
+        // A new firmware generation has no rate state of its own, so a demotion from the previous
+        // generation must not keep this station on firmware rate control.
+        s.heDemoted = false;
+        s.fixedOff = false;
+        s.heStartUS = 0;
+        s.heStartFixedHe = false;
     }
     // On the listener's own context, or on the station's when it shares that (unless -itlawdlnosharedba).
     if (!awdlCoexData || !awdlCoexAdded || (!awdlCoexMultiActive && awdlCoexNoSharedBa) || !awdlCoexTxStaAdded ||
@@ -9727,7 +10341,8 @@ awdlRxTask(void *arg)
                 rateResults->release();
             }
         root->setProperty("AwFixedChannel", awdlFixedChannel, 32);
-        root->setProperty("AwBtCoexMode", Aw::btCoexModeFor(awdlBtCoexRequest, IWX_BT_COEX_WIFI), 32);
+        root->setProperty("AwBtCoexMode", Aw::btCoexModeFor(awdlBtCoexRequest, IWX_BT_COEX_NW), 32);
+        root->setProperty("AwBtCoexModules", Aw::btCoexModulesFor(Aw::btCoexModeFor(awdlBtCoexRequest, IWX_BT_COEX_NW)), 32);
         root->setProperty("AwRequestedCountry", awdlCountry);
         root->setProperty("AwCountryScans", awdlCountryScans, 32);
         root->setProperty("AwBackgroundScans", awdlBackgroundScans, 32);
@@ -11718,8 +12333,18 @@ iwx_rx_tx_ba_notif(struct iwx_softc *sc, struct iwx_rx_packet *pkt, struct iwx_r
                 if (ns.heWinTxed >= 16) {
                     if (ns.heWinDone * 4 < ns.heWinTxed * 3) {
                         if (++ns.hePoorAcks >= 3) {
-                            ns.heDemoted = true;
-                            ++awdlCoexHeTxDemotes;
+                            // Demote the flavour that is actually running. This window covers both
+                            // flavours, so setting heDemoted for a bad VHT episode would report and
+                            // behave as if HE had failed.
+                            if (ns.heStartFixedHe) {
+                                ns.heDemoted = true;
+                                ++awdlCoexHeTxDemotes;
+                            } else {
+                                ns.fixedOff = true;
+                                ++awdlCoexVhtFixedDemotes;
+                            }
+                            ns.heStartUS = 0;
+                            ns.heStartFixedHe = false;
                             ns.hePoorAcks = 0;
                         }
                     } else
@@ -13129,7 +13754,14 @@ void ItlIwx::iwx_awdl_transport_probe(struct iwx_softc *sc)
         if (awdlWindow > 1) {
             if (awdlResend.held)
                 return;
-            if (!awdlBurst.count) {
+            // Multicast leaves only while the plan says we are inside an availability window (the
+            // native rule: multicast is limited to the peer's listening window, and what we announce
+            // is the plan we actually follow). Without a running plan this is exactly the old
+            // behaviour.
+            const bool mcastWindowOpen = !(awdlSchedReady && awdlSchedFollows) || itlAWDLSchedInWindow();
+            if (!awdlBurst.count && !mcastWindowOpen)
+                ++awdlSchedMcastHeld;
+            if (!awdlBurst.count && mcastWindowOpen) {
                 if (auto *repeat = awdlMulticastRepeats.due(syncNowUS)) {
                     mbuf_t copy = nullptr;
                     if (!mbuf_getpacket(MBUF_DONTWAIT, &copy) && copy && mbuf_maxlen(copy) >= repeat->length) {
@@ -13147,7 +13779,7 @@ void ItlIwx::iwx_awdl_transport_probe(struct iwx_softc *sc)
                     Aw::MulticastRepeats::sent(*repeat, syncNowUS);
                 }
             }
-            if (awdlDeferredMulticast && !awdlBurst.count) {
+            if (mcastWindowOpen && awdlDeferredMulticast && !awdlBurst.count) {
                 mbuf_t held = awdlDeferredMulticast;
                 awdlDeferredMulticast = nullptr;
                 sendMulticast(held);
@@ -13645,16 +14277,24 @@ iwx_tx(struct iwx_softc *sc, mbuf_t m, struct ieee80211_node *ni, int ac, int mo
                 fxS.heStartFixedHe = heFlavour;
             }
             ++fxS.heTxFrames;
+            // The width must be the station's, not a constant. awdlCoexBaWidth() gives 20 MHz whenever
+            // the slot is not on the listener's own context and the BSS node is 2.4 GHz or 20 MHz wide
+            // (unassociated, or associated to a 20 MHz router), and the station was added with
+            // FAT_EN_20MHZ. A rate word that then claims 80 MHz asks the firmware for a PPDU wider than
+            // the station it is addressed to -- the same class of mismatch as the HE flavour's.
+            const uint32_t fxWidth = fxS.peerWidth == 80 ? uint32_t(IWX_RATE_MCS_CHAN_WIDTH_80)
+                                                         : uint32_t(IWX_RATE_MCS_CHAN_WIDTH_20);
             if (heFlavour) {
                 // 4x LTF with 0.8 us guard: leaving the GI/LTF field at zero means 1x LTF, which is
                 // not a legal combination for two streams, so the firmware would build no PPDU at all.
-                rate_n_flags = htole32(IWX_RATE_MCS_HE_MSK | IWX_RATE_MCS_CHAN_WIDTH_80 |
+                rate_n_flags = htole32(IWX_RATE_MCS_HE_MSK | fxWidth |
                                        IWX_RATE_MCS_NSS_MSK | IWX_RATE_MCS_ANT_AB_MSK |
-                                       (uint32_t(IWX_RATE_MCS_HE_SU_4_LTF_08_GI) << IWX_RATE_MCS_HE_GI_LTF_POS) |
+                                       (awdlCoexHeGltf << IWX_RATE_MCS_HE_GI_LTF_POS) |
                                        awdlCoexHeTxMcs);
+                awdlCoexHeRateWord = le32toh(rate_n_flags);
             } else {
-                // The default flavour: VHT, 80 MHz, two streams, at the fixed MCS.
-                rate_n_flags = htole32(IWX_RATE_MCS_VHT_MSK | IWX_RATE_MCS_CHAN_WIDTH_80 |
+                // The default flavour: VHT, two streams, at the fixed MCS.
+                rate_n_flags = htole32(IWX_RATE_MCS_VHT_MSK | fxWidth |
                                        IWX_RATE_MCS_NSS_MSK | IWX_RATE_MCS_ANT_AB_MSK |
                                        awdlCoexVhtFixedMcs);
                 ++awdlCoexVhtFixedFrames;
@@ -16025,10 +16665,9 @@ static uint8_t iwx_rs_fw_bw_from_sta_bw(uint8_t bw)
 }
 
 uint16_t ItlIwx::
-iwx_rs_fw_get_config_flags(struct iwx_softc *sc)
+iwx_rs_fw_get_config_flags(struct iwx_softc *sc, struct ieee80211_node *ni)
 {
     struct ieee80211com *ic = &sc->sc_ic;
-    struct ieee80211_node *ni = ic->ic_bss;
     uint16_t flags = 0;
     
     if (ic->ic_state < IEEE80211_S_ASSOC) {
@@ -16071,9 +16710,9 @@ iwx_rs_fw_get_config_flags(struct iwx_softc *sc)
 
 static
 int rs_fw_vht_highest_rx_mcs_index(struct iwx_softc *sc,
-                   int nss)
+                   struct ieee80211_node *ni, int nss)
 {
-    uint16_t rx_mcs = le16toh(sc->sc_ic.ic_bss->ni_vht_mcsinfo.rx_mcs_map) &
+    uint16_t rx_mcs = le16toh(ni->ni_vht_mcsinfo.rx_mcs_map) &
         (0x3 << (2 * (nss - 1)));
     rx_mcs >>= (2 * (nss - 1));
 
@@ -16092,26 +16731,38 @@ int rs_fw_vht_highest_rx_mcs_index(struct iwx_softc *sc,
     return 0;
 }
 
+// #83: the rate table handed to the firmware must describe the station being configured, not the
+// BSS the station happens to sit next to. The old code read ni_chw/ni_rx_nss/MCS maps out of
+// ic_bss (the router's node) and wrote them into the table sent for whatever node came in --
+// the listener's AirDrop peer included. With a 160 MHz Wi-Fi 6 router that put a full 160 MHz
+// MCS set in the table for a 20 MHz peer, and the firmware asserted on the leftover entries as
+// soon as AirDrop started. Both width and the per-bandwidth columns are now derived from the
+// node under configuration, and a column is only filled at the width that node actually uses.
 static void
-iwx_rs_fw_vht_set_enabled_rates(struct iwx_softc *sc,
-                struct iwx_tlc_config_cmd_v4 *cmd)
+iwx_rs_fw_vht_set_enabled_rates(struct iwx_softc *sc, struct ieee80211_node *ni,
+                uint8_t width, struct iwx_tlc_config_cmd_v4 *cmd)
 {
     uint16_t supp;
     int i, highest_mcs;
-    struct ieee80211com *ic = &sc->sc_ic;
 
-    for (i = 0; i < IWX_TLC_NSS_MAX && i < ic->ic_bss->ni_rx_nss; i++) {
-        highest_mcs = rs_fw_vht_highest_rx_mcs_index(sc, i + 1);
+    for (i = 0; i < IWX_TLC_NSS_MAX && i < ni->ni_rx_nss; i++) {
+        highest_mcs = rs_fw_vht_highest_rx_mcs_index(sc, ni, i + 1);
         if (!highest_mcs)
             continue;
 
         supp = (1 << (highest_mcs + 1)) - 1;
-        if (ic->ic_bss->ni_chw == IEEE80211_CHAN_WIDTH_20)
+        // MCS9 needs more than 20 MHz. The node is set to 20_NOHT (0) on the way into AUTH, so
+        // both narrow values count, not just CHAN_WIDTH_20.
+        if (width < IEEE80211_CHAN_WIDTH_40)
             supp &= ~(1 << IWX_TLC_MNG_HT_RATE_MCS9);
 
         cmd->ht_rates[i][IWX_TLC_MCS_PER_BW_80] = htole16(supp);
-        if (ic->ic_bss->ni_chw == IEEE80211_CHAN_WIDTH_80P80 || ic->ic_bss->ni_chw == IEEE80211_CHAN_WIDTH_160)
-            cmd->ht_rates[i][1] = cmd->ht_rates[i][0];
+        // Column 1 is 160 MHz. Fill it only for a station that is at 160; a narrower peer keeps
+        // an empty column instead of inheriting the wider one.
+        if (width == IEEE80211_CHAN_WIDTH_80P80 || width == IEEE80211_CHAN_WIDTH_160)
+            cmd->ht_rates[i][IWX_TLC_MCS_PER_BW_160] = cmd->ht_rates[i][IWX_TLC_MCS_PER_BW_80];
+        else
+            cmd->ht_rates[i][IWX_TLC_MCS_PER_BW_160] = 0;
     }
 }
 
@@ -16145,19 +16796,23 @@ static uint8_t iwx_rs_fw_set_active_chains(uint8_t chains)
 }
 
 static void
-iwx_rs_fw_he_set_enabled_rates(struct iwx_softc *sc,
-    struct iwx_tlc_config_cmd_v4 *cmd)
+iwx_rs_fw_he_set_enabled_rates(struct iwx_softc *sc, struct ieee80211_node *ni,
+    uint8_t width, struct iwx_tlc_config_cmd_v4 *cmd)
 {
     struct ieee80211com *ic = &sc->sc_ic;
-    struct ieee80211_node *ni = ic->ic_bss;
     uint16_t maps[2] = {
         ieee80211_he_mcs_intersection(le16toh(ni->ni_he_mcs_nss_supp.rx_mcs_80),
             le16toh(ic->ic_he_mcs_nss_supp.tx_mcs_80)),
         ieee80211_he_mcs_intersection(le16toh(ni->ni_he_mcs_nss_supp.rx_mcs_160),
             le16toh(ic->ic_he_mcs_nss_supp.tx_mcs_160))
     };
-    if (ni->ni_chw != IEEE80211_CHAN_WIDTH_160)
-        maps[IWX_TLC_MCS_PER_BW_160] = 0xffff;
+    // #83: in this encoding 0xffff means "every MCS", not "none". The old rule wrote 0xffff for a
+    // station that is not at 160, which turned the 160 MHz column into a full rate set; that is the
+    // table the firmware rejected for the 20 MHz AirDrop peer. A width the station is not using
+    // gets an empty column, not a permissive one.
+    bool wide = width == IEEE80211_CHAN_WIDTH_160 || width == IEEE80211_CHAN_WIDTH_80P80;
+    if (!wide)
+        maps[IWX_TLC_MCS_PER_BW_160] = 0;
     bool ldpc = ni->ni_he_cap_elem.phy_cap_info[1] & IEEE80211_HE_PHY_CAP1_LDPC_CODING_IN_PAYLOAD;
     for (unsigned ss = 0; ss < IWX_TLC_NSS_MAX; ss++) {
         for (unsigned bw = 0; bw < 2; bw++) {
@@ -16165,6 +16820,8 @@ iwx_rs_fw_he_set_enabled_rates(struct iwx_softc *sc,
                 rs_fw_he_ieee80211_mcs_to_rs_mcs((maps[bw] >> (2 * ss)) & 3) : 0;
             if (!ldpc)
                 mask &= 0x03ff; /* HE MCS10/11 requires LDPC. */
+            if (!wide && bw == IWX_TLC_MCS_PER_BW_160)
+                mask = 0;
             cmd->ht_rates[ss][bw] = htole16(mask);
         }
     }
@@ -16271,9 +16928,11 @@ iwx_config_he_sta(struct iwx_softc *sc, struct ieee80211_node *ni)
 }
 
 // The HE context of one of the listener's peer stations. There is no node to read capabilities from,
-// so ours stand in: that peer already proved it receives HE by sending us HE frames, and the fixed HE
-// rate this driver asks for (MCS 7, two streams, 4xLTF/0.8us) sits inside every HE device's mandatory
-// set. Returns the firmware's answer; nonzero means no HE PPDU can be built for that station.
+// so ours stand in: that peer already proved it receives HE by sending us HE frames. The fixed HE rate
+// this driver asks for is now the top of the 2SS ladder (MCS 11, 1024-QAM, 4xLTF/0.8us), which is NOT
+// part of any mandatory set -- a peer that cannot do 1024-QAM will not decode it, and the ack watchdog
+// then demotes the slot. -itlawdlcoexhemcs=N is the knob for that. Returns the firmware's answer;
+// nonzero means no HE PPDU can be built for that station.
 int ItlIwx::
 iwx_config_he_sta_self(struct iwx_softc *sc, uint8_t sta_id)
 {
@@ -16315,12 +16974,16 @@ iwx_rs_init(struct iwx_softc *sc, struct iwx_node *in, bool update)
             return EINVAL;
         cfg_cmd.non_ht_rates |= (1 << idx);
     }
+    // A setup pass configures the node as a 20 MHz station (max_ch_width is forced to 20 below),
+    // so that is the width the table is built for. An update follows the node's negotiated width.
+    // #83: this used to be read from the node for the width but from ic_bss for the rates.
+    const uint8_t tableWidth = update ? ni->ni_chw : IEEE80211_CHAN_WIDTH_20;
     if (ni->ni_flags & IEEE80211_NODE_HE) {
         cfg_cmd.mode = IWX_TLC_MNG_MODE_HE;
-        iwx_rs_fw_he_set_enabled_rates(sc, &cfg_cmd);
+        iwx_rs_fw_he_set_enabled_rates(sc, ni, tableWidth, &cfg_cmd);
     } else if (ni->ni_flags & IEEE80211_NODE_VHT) {
         cfg_cmd.mode = IWX_TLC_MNG_MODE_VHT;
-        iwx_rs_fw_vht_set_enabled_rates(sc, &cfg_cmd);
+        iwx_rs_fw_vht_set_enabled_rates(sc, ni, tableWidth, &cfg_cmd);
     } else if (ni->ni_flags & IEEE80211_NODE_HT) {
         cfg_cmd.mode = IWX_TLC_MNG_MODE_HT;
         cfg_cmd.ht_rates[IWX_TLC_NSS_1][IWX_TLC_MCS_PER_BW_80] = htole16(iwx_rs_ht_rates(sc, ni, ni->ni_chw == IEEE80211_CHAN_WIDTH_40 ? IEEE80211_HT_RATESET_CBW40_SISO : IEEE80211_HT_RATESET_SISO));
@@ -16338,6 +17001,15 @@ iwx_rs_init(struct iwx_softc *sc, struct iwx_node *in, bool update)
         // The peer has no node here. High HT rates only: it leaves the channel often, and rate
         // control would otherwise take that for a bad link and drop far down.
         cfg_cmd.mode = IWX_TLC_MNG_MODE_HT;
+        // #83: whatever the node above put in the 160 MHz column belongs to that node's link. This
+        // table describes the listener's peer, which is 20 or 80 MHz, so the column is emptied here
+        // -- this is where a 160 MHz Wi-Fi 6 router's rates used to end up in the AirDrop peer's
+        // table and take the firmware with them. The count is what proves it was non-zero.
+        if (cfg_cmd.ht_rates[IWX_TLC_NSS_1][IWX_TLC_MCS_PER_BW_160] ||
+            cfg_cmd.ht_rates[IWX_TLC_NSS_2][IWX_TLC_MCS_PER_BW_160])
+            ++awdlBaTlcWideCleared;
+        cfg_cmd.ht_rates[IWX_TLC_NSS_1][IWX_TLC_MCS_PER_BW_160] = 0;
+        cfg_cmd.ht_rates[IWX_TLC_NSS_2][IWX_TLC_MCS_PER_BW_160] = 0;
         cfg_cmd.ht_rates[IWX_TLC_NSS_1][IWX_TLC_MCS_PER_BW_80] = htole16(0xf0);
         cfg_cmd.ht_rates[IWX_TLC_NSS_2][IWX_TLC_MCS_PER_BW_80] = htole16(0xf0);
         cfg_cmd.sta_id = awdlBaTlcStaId;
@@ -16354,14 +17026,14 @@ iwx_rs_init(struct iwx_softc *sc, struct iwx_node *in, bool update)
             cfg_cmd.max_ch_width = IWX_TLC_MNG_CH_WIDTH_80MHZ;
         }
         cfg_cmd.chains = iwx_rs_fw_set_active_chains(iwx_fw_valid_tx_ant(sc));
-        cfg_cmd.flags = iwx_rs_fw_get_config_flags(sc);
+        cfg_cmd.flags = iwx_rs_fw_get_config_flags(sc, ni);
         cfg_cmd.sgi_ch_width_supp = (1 << IWX_TLC_MNG_CH_WIDTH_20MHZ);
         goto send;
     }
     cfg_cmd.sta_id = IWX_STATION_ID;
     cfg_cmd.max_ch_width = update ? iwx_rs_fw_bw_from_sta_bw(ni->ni_chw) : IWX_RATE_MCS_CHAN_WIDTH_20;
     cfg_cmd.chains = iwx_rs_fw_set_active_chains(iwx_fw_valid_tx_ant(sc));
-    cfg_cmd.flags = iwx_rs_fw_get_config_flags(sc);
+    cfg_cmd.flags = iwx_rs_fw_get_config_flags(sc, ni);
     if ((ni->ni_flags & IEEE80211_NODE_HE) == 0) {
         if (ieee80211_node_supports_ht_sgi20(ni))
             cfg_cmd.sgi_ch_width_supp = (1 << IWX_TLC_MNG_CH_WIDTH_20MHZ);
@@ -17184,9 +17856,57 @@ awdlCoexCountryAnswer(struct iwx_softc *sc)
     awdlCoexPublish();
 }
 
-// Moves the listener's own context when the firmware's channel map changes: up to 149 at 80 MHz when it is
-// allowed (at most every 10 s), back down to 6 at once when it is withdrawn. The binding stays; only the PHY
-// context moves, then the listener's MAC context takes the new band's rates.
+// #90: the listener only leaves channel 6 once the firmware has told it a country, and on some boots
+// the notice never comes. Nothing is broken in that case -- the firmware simply has nothing to
+// volunteer -- but an iPhone then counts the Mac as out of range and AirDrop never starts. So while
+// the station is up and no usable country is known, ask the firmware for its current one, the way
+// Linux polls its own regulatory domain. The reply goes through the same machinery a notice does:
+// the fields are loaded here and the next beat's awdlCoexCountryAnswer applies it, so hint clearing,
+// 149 handling and the counters have exactly one implementation.
+void ItlIwx::
+awdlCoexCountryPoll(struct iwx_softc *sc)
+{
+    const int gen = sc->sc_generation;
+    Aw::MccSample reply{};
+    const int err = iwx_mcc_request(sc, 'Z' << 8 | 'Z', IWX_MCC_SOURCE_GET_CURRENT, &reply, true);
+    ++awdlCoexCountryPolls;
+    // Scheduled before any early return: a firmware that keeps failing must not turn this into a
+    // tight command loop.
+    awdlCoexCountryPollNextUS = awdlUptimeUS() + kAwdlCoexCountryPollUS;
+    if (gen != sc->sc_generation) {
+        awdlCoexPublish();
+        return;
+    }
+    awdlCoexCountryPollLast = err ? 0x80000000U | uint32_t(err) : reply.status;
+    // The reply's channel map was applied above, which rebuilds it from the firmware's profile. That
+    // rebuild re-marks 149-161 passive under some domains, and a PASSIVE bit there refuses the
+    // listener's own 80 MHz sends. Same guard the answer path uses, idempotent and cheap.
+    if (!err)
+        awdlCoexKeep149Active(&sc->sc_ic);
+    if (err || !Aw::countryNoticeUsable(reply.mcc, reply.source)) {
+        // No country, or one that unlocks nothing: the reply's channel map was still applied above,
+        // so whatever the firmware enforces stays in force. The next poll tries again.
+        awdlCoexPublish();
+        return;
+    }
+    ++awdlCoexCountryPollFinds;
+    if (awdlCoexCountryGen != gen) {
+        // First usable country of this firmware: the notice handler's per-generation reset, so the
+        // answer path sees the state it expects.
+        awdlCoexCountryGen = gen;
+        awdlCoexCountryAnswered = 0;
+        awdlCoexCountrySourceAnswered = 0;
+        awdlCoexCountryLearned = false;
+        awdlCoexCountryPending = false;
+        awdlCoexCountryRetryUS = 0;
+    }
+    awdlCoexCountryNotice = reply.mcc;
+    awdlCoexCountrySource = reply.source;
+    awdlCoexCountryPending = true;
+    awdlCoexPublish();
+}
+
+
 void ItlIwx::
 awdlCoexRetarget(struct iwx_softc *sc)
 {
@@ -17370,6 +18090,11 @@ awdlCoexListener(struct iwx_softc *sc, bool add)
             s.txQueue = -1;
             s.tidTeardown = 0;
             s.rxIdleTids = 0;
+            // Same as the per-slot generation reset: the restart took the rate state with it.
+            s.heDemoted = false;
+            s.fixedOff = false;
+            s.heStartUS = 0;
+            s.heStartFixedHe = false;
         }
         awdlCoexBaFilterOff = false;
         awdlCoexBaFilter = Aw::BaFilterState{};
@@ -17378,6 +18103,8 @@ awdlCoexListener(struct iwx_softc *sc, bool add)
         awdlCoexTxSetupNextUS = 0;
         awdlCoexGeneration = sc->sc_generation;
         ++awdlCoexToken;
+        // A firmware restart took the moved context with it; the hop bookkeeping starts clean.
+        awdlSchedHopChan = 0;
     }
     // A removal while an add waits on the firmware: the add sees this and undoes what it made.
     if (!add && awdlCoexAddingGen == sc->sc_generation) {
@@ -18553,9 +19280,12 @@ iwx_send_bt_init_conf(struct iwx_softc *sc)
     struct iwx_bt_coex_cmd bt_cmd;
     
     // Monitor mode keeps Wi-Fi busy on 2.4 GHz, so an AWDL test boot may need a different
-    // balance with Bluetooth, which shares the radio. Default behaviour is unchanged.
-    bt_cmd.mode = htole32(Aw::btCoexModeFor(awdlBtCoexRequest, IWX_BT_COEX_WIFI));
-    bt_cmd.enabled_modules = 0;
+    // balance with Bluetooth, which shares the radio. #92: the default is the shared mode with
+    // Bluetooth audio/call priority; the module bits follow the mode, so the Wi-Fi-first setting
+    // still sends none of them, exactly as before.
+    const uint32_t coexMode = Aw::btCoexModeFor(awdlBtCoexRequest, IWX_BT_COEX_NW);
+    bt_cmd.mode = htole32(coexMode);
+    bt_cmd.enabled_modules = htole32(Aw::btCoexModulesFor(coexMode));
     
     return iwx_send_cmd_pdu(sc, IWX_BT_CONFIG, 0, sizeof(bt_cmd),
                             &bt_cmd);
@@ -21997,6 +22727,32 @@ iwx_preinit(struct iwx_softc *sc)
     
     /* Configure channel information obtained from firmware. */
     ieee80211_channel_init(ifp);
+#if ITL_TELEMETRY
+    /* Snapshot of everything the 11ax decision depends on, taken right after the capability
+     * table was built. Bit i of ItlwmSku mirrors the NVM MAC sku flag of the same index:
+     * 0 = 2.4GHz, 1 = 5.2GHz, 2 = 11n, 3 = 11ac, 4 = 11ax, 5 = MIMO disabled. */
+    {
+        uint32_t skuBits = 0;
+        if (sc->sc_nvm.sku_cap_band_24GHz_enable)
+            skuBits |= 1U << 0;
+        if (sc->sc_nvm.sku_cap_band_52GHz_enable)
+            skuBits |= 1U << 1;
+        if (sc->sc_nvm.sku_cap_11n_enable)
+            skuBits |= 1U << 2;
+        if (sc->sc_nvm.sku_cap_11ac_enable)
+            skuBits |= 1U << 3;
+        if (sc->sc_nvm.sku_cap_11ax_enable)
+            skuBits |= 1U << 4;
+        if (sc->sc_nvm.sku_cap_mimo_disable)
+            skuBits |= 1U << 5;
+        ITL_DIAG_SET(IORegistryEntry::getRegistryRoot(), "ItlwmSku", uint64_t(skuBits), 32);
+        ITL_DIAG_SET(IORegistryEntry::getRegistryRoot(), "ItlwmModeCaps", uint64_t(ic->ic_modecaps), 32);
+        ITL_DIAG_SET(IORegistryEntry::getRegistryRoot(), "ItlwmPreFlags", uint64_t(ic->ic_flags), 32);
+        ITL_DIAG_SET(IORegistryEntry::getRegistryRoot(), "ItlwmPreUserFlags", uint64_t(ic->ic_userflags), 32);
+        ITL_DIAG_SET(IORegistryEntry::getRegistryRoot(), "ItlwmPreAnt",
+                     uint64_t(sc->sc_nvm.valid_tx_ant) | (uint64_t(sc->sc_nvm.valid_rx_ant) << 8), 32);
+    }
+#endif
     
     /* Configure MAC address. */
     err = if_setlladdr(ifp, ic->ic_myaddr);
@@ -22353,6 +23109,10 @@ iwx_attach(struct iwx_softc *sc, struct pci_attach_args *pa)
         awdlCoexScanHold = !PE_parse_boot_argn("-itlawdlcoexnoscanhold", &dummy, sizeof(dummy));
         // -itlawdlcoexscancap: restore the 20 s ceiling on the hold (v63 default is no ceiling).
         awdlCoexScanCap = PE_parse_boot_argn("-itlawdlcoexscancap", &dummy, sizeof(dummy));
+        // -itlawdlcoexnocountrypoll: stop asking the firmware for its country every 30 s (#90). Only
+        // for comparing against the old "wait for a notice" behaviour.
+        awdlCoexCountryPollOff = PE_parse_boot_argn("-itlawdlcoexnocountrypoll", &dummy, sizeof(dummy));
+        awdlCoexCountryPollNextUS = 0;
         // -itlawdlcoexpark: put the sweep scheduler back (detach the listener for a sweep, rebuild after it).
         // Off (v52) because the rebuild fails 18/18 inside iwx_endscan and leaves the TX path dead for the
         // rest of the boot; see the definition.
@@ -22366,12 +23126,54 @@ iwx_attach(struct iwx_softc *sc, struct pci_attach_args *pa)
         // now also demands the station's HE context, which only exists when -itlwm_he=1 is set.
         awdlCoexHeCtxtBypass = PE_parse_boot_argn("-itlawdlcoexhelegacy", &dummy, sizeof(dummy));
         awdlCoexVhtFixedOff = PE_parse_boot_argn("-itlawdlcoexnovht", &dummy, sizeof(dummy));
+        // ⛔ PE_parse_boot_argn matches the caller's name against the boot arg token *including* its
+        // leading '-', so a value argument must be looked up with the dash as well: "itlawdlcoexhemcs"
+        // never matched nvram's "-itlawdlcoexhemcs=11" and both MCS selectors had been silent no-ops.
+        // The undashed form is still tried, for a boot arg written without the dash.
+        // On by default since the 2.5.18 release: run macOS's own AirDrop availability plan
+        // (ic_awdl_*, fed by APPLE80211_IOC_AWDL_SYNC_PARAMS) instead of periods of our own, and
+        // publish the window we are actually in. -itlawdlnosched turns it off.
+        awdlSchedOn = !PE_parse_boot_argn("-itlawdlnosched", &dummy, sizeof(dummy));
+        // -itlawdlnoschedprot: turn off sending SESSION_PROTECTION on the listener MAC context before
+        // each plan window (the native P2P-device session-protection idea on our own context). It is a
+        // firmware command and stands alone because of it: the rest of the plan follower never talks
+        // to the firmware. Default on since 2.5.18.
+        awdlSchedProtOn = awdlSchedOn && !PE_parse_boot_argn("-itlawdlnoschedprot", &dummy, sizeof(dummy));
+        // -itlawdlschedlead=N: how many milliseconds before a window the protection is requested.
+        // The native default is 12 ms; 0..100 accepted.
+        uint32_t requestedLead = 0;
+        if (PE_parse_boot_argn("-itlawdlschedlead", &requestedLead, sizeof(requestedLead)) &&
+            requestedLead <= 100)
+            awdlSchedProtLeadMS = requestedLead;
+        // -itlawdlnohop: turn off moving the listener's PHY onto the window's channel before it
+        // and home after it (the native ch6-dwell idea, on our own context). Default on since
+        // 2.5.18. Requires the protection: without it the firmware gives the window no airtime on
+        // the moved context. -itlawdlhopchan=N names the target; without it AWDL_MASTER_CHANNEL's
+        // value is used.
+        awdlSchedHopOn = awdlSchedProtOn && !PE_parse_boot_argn("-itlawdlnohop", &dummy, sizeof(dummy));
+        // -itlawdlnohopslot: turn off per-window following of macOS's channel-sequence channel for
+        // the slot (a zero slot stays home) instead of AWDL_MASTER_CHANNEL's one. Default on since
+        // 2.5.18.
+        awdlSchedHopSlot = awdlSchedHopOn && !PE_parse_boot_argn("-itlawdlnohopslot", &dummy, sizeof(dummy));
+        uint32_t requestedHopChan = 0;
+        if (PE_parse_boot_argn("-itlawdlhopchan", &requestedHopChan, sizeof(requestedHopChan)) &&
+            requestedHopChan > 0 && requestedHopChan < 256)
+            awdlSchedHopChanArg = uint8_t(requestedHopChan);
         uint32_t requestedHeMcs = 0;
-        if (PE_parse_boot_argn("itlawdlcoexhemcs", &requestedHeMcs, sizeof(requestedHeMcs)) && requestedHeMcs <= 11)
+        if ((PE_parse_boot_argn("-itlawdlcoexhemcs", &requestedHeMcs, sizeof(requestedHeMcs)) ||
+             PE_parse_boot_argn("itlawdlcoexhemcs", &requestedHeMcs, sizeof(requestedHeMcs))) &&
+            requestedHeMcs <= 11)
             awdlCoexHeTxMcs = requestedHeMcs;
         uint32_t requestedVhtMcs = 0;
-        if (PE_parse_boot_argn("itlawdlcoexvhtmcs", &requestedVhtMcs, sizeof(requestedVhtMcs)) && requestedVhtMcs <= 9)
+        if ((PE_parse_boot_argn("-itlawdlcoexvhtmcs", &requestedVhtMcs, sizeof(requestedVhtMcs)) ||
+             PE_parse_boot_argn("itlawdlcoexvhtmcs", &requestedVhtMcs, sizeof(requestedVhtMcs))) &&
+            requestedVhtMcs <= 9)
             awdlCoexVhtFixedMcs = requestedVhtMcs;
+        uint32_t requestedGltf = 0;
+        if ((PE_parse_boot_argn("-itlawdlcoexhegltf", &requestedGltf, sizeof(requestedGltf)) ||
+             PE_parse_boot_argn("itlawdlcoexhegltf", &requestedGltf, sizeof(requestedGltf))) &&
+            requestedGltf <= 7)
+            awdlCoexHeGltf = requestedGltf;
         awdlCoexAwSyncAssume = awdlCoexData && PE_parse_boot_argn("-itlawdlcoexawsync0", &dummy, sizeof(dummy));
         awdlCoexGate = !PE_parse_boot_argn("-itlawdlcoexnogate", &dummy, sizeof(dummy));
         awdlCoexAssumeZero = !PE_parse_boot_argn("-itlawdlcoexcalwait", &dummy, sizeof(dummy));
@@ -22414,10 +23216,23 @@ iwx_attach(struct iwx_softc *sc, struct pci_attach_args *pa)
         uint32_t requestedCoexCycle = 0;
         if (awdlCoexProbe && PE_parse_boot_argn("itlawdlcoexcycle", &requestedCoexCycle, sizeof(requestedCoexCycle)) &&
             requestedCoexCycle >= 10 && requestedCoexCycle <= 3600) {
+            // The experiment's own cadence, seconds. Its listener flip stays with it.
             awdlCoexCycleSecs = requestedCoexCycle;
+            awdlCoexCycleExperiment = true;
+        } else if (awdlCoexProbe) {
+            // Default: run every second. The plan follower's slot tick lives on this task, so
+            // without a cycle nothing of -itlawdlsched ever runs -- the flag-only assembly kept
+            // the whole follower dead for anyone who did not also pass the experiment flag.
+            awdlCoexCycleSecs = 1;
+        }
+        if (awdlCoexCycleSecs) {
             task_set(&awdlCoexTaskEntry, awdlCoexCycleTask, sc, "awdlCoexCycleTask");
             timeout_set(&awdlCoexTimer, awdlCoexCycleTimeout, sc);
             timeout_add_sec(&awdlCoexTimer, awdlCoexCycleSecs);
+            // Plan slot-boundary timer. Never armed here: the slot tick arms it once the plan is
+            // running and -itlawdlschedprot asked for session protection.
+            task_set(&awdlSchedTaskEntry, awdlSchedSlotTask, sc, "awdlSchedSlotTask");
+            timeout_set(&awdlSchedTimer, awdlSchedSlotTimeout, sc);
         }
         uint32_t requestedCoexFilter = 0;
         if (PE_parse_boot_argn("itlawdlcoexfilter", &requestedCoexFilter, sizeof(requestedCoexFilter)) &&

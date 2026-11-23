@@ -460,6 +460,32 @@ inline int restoreAfterCreate(Park &p, OutPacket *out) {
 // continuously for those seconds. Only the create's own window is rewritten - host scanning and
 // advertising stay exactly as bluetoothd set them, which is what the earlier pre-scan park got
 // wrong. Returns true when the command changed; *observed gets interval << 16 | window.
+// -btleadvnodupfilter (0.7-equivalent): bluetoothd enables LE scanning with Filter_Duplicates
+// set, so the controller reports each Continuity advertisement once and then stays quiet - the
+// phone's renewed advertisements never reach it, and connecting to a phone that went idle waits
+// out its next advertising cycle (the "slow connects, failed first send after idle" pair the
+// 0.7 flags address). Clearing the filter bit lets every advertisement through: bluetoothd sees
+// more reports than it asked for, which is exactly the point. Only the two scan-enable commands
+// are touched; scanning itself stays as bluetoothd set it.
+inline int clearScanDuplicates(uint8_t *hci, size_t length) {
+    if (!hci || length < 5)
+        return 0;
+    switch (opcodeOf(hci)) {
+    case OpLeScanEnable:      // [3] filter_duplicates, [4] scan_enable
+        if (!hci[3])
+            return 0;
+        hci[3] = 0;
+        return 1;
+    case OpLeExtScanEnable:   // [3] enable, [4] filter_duplicates
+        if (!hci[4])
+            return 0;
+        hci[4] = 0;
+        return 1;
+    default:
+        return 0;
+    }
+}
+
 inline bool widenInitiatorScan(uint8_t *hci, size_t length, uint32_t *observed) {
     if (!hci || length < 4)
         return false;

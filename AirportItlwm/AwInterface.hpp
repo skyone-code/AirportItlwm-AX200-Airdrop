@@ -6,6 +6,7 @@
 #include <Airport/IOSkywalkQueueFactories.h>
 #include "AwRequestedValue.hpp"
 #include "AwInactiveProtocol.hpp"
+#include <AwPeerProbe.hpp>
 #include <IOKit/IOLocks.h>
 
 class AwNativeInterface : public IO80211AWDLProtocol {
@@ -17,6 +18,10 @@ public:
         uint8_t address[6];
         size_t templateLength;
         uint8_t staticTLVs[AwNativeFrameTemplate::capacity];
+        // macOS's channel sequence, decoded from the raw ioctl bytes; zero channel means
+        // "not on AWDL this slot". Empty until the peer manager sends the sequence ioctl.
+        Aw::AwChanSeqPlan chanSeqPlan = {};
+        bool hasChanSeqPlan = false;
     };
     // Caller retains this interface and holds the shared controller gate.
     // The copy owns every byte and does not activate the native transport.
@@ -42,13 +47,18 @@ public:
     // the Wi-Fi daemons' user clients), and when the BSD interface is prepared and finalised.
     bool handleOpen(IOService*, IOOptionBits, void*) override;
     void handleClose(IOService*, IOOptionBits) override;
-#if __IO80211_TARGET == __MAC_15_2
+    // #85: the ifnet macOS gave awdl0, so a new address can reach ifconfig as well as the frames
+    // we build. Tahoe declares the same two hooks as Sequoia; Sonoma has no virtual interface.
+#if __IO80211_TARGET == __MAC_15_2 || __IO80211_TARGET == __MAC_26_0
     IOReturn prepareBSDInterface(struct __ifnet*, unsigned int) override;
     void finalizeBSDInterface(struct __ifnet*, unsigned int) override;
 #endif
     // Pure in IO80211VirtualInterface on Tahoe, and in IO80211SkywalkInterface on Sequoia.
 #if __IO80211_TARGET != __MAC_14_4   // not a virtual on Sonoma
-    IOReturn setMacAddress(ether_addr&) override { return unsupported("setMacAddress"); }
+    // #85: macOS hands awdl0 a fresh randomised address and expects it to be used. Refusing it
+    // left the interface on the factory address while macOS believed otherwise, so every frame
+    // we built kept the old source. -itlawdladdrkeep restores the refusal for a comparison boot.
+    IOReturn setMacAddress(ether_addr&) override;
 #endif
     IOReturn getSSID(apple80211_ssid_data*) override { return unsupported("getSSID"); }
     IOReturn getCHANNEL(apple80211_channel_data*) override { return unsupported("getCHANNEL"); }
@@ -79,7 +89,17 @@ public:
     IOReturn getLLW_PARAMS(apple80211_llw_params*) override { return unsupported("getLLW_PARAMS"); }
     IOReturn setSSID(apple80211_ssid_data*) override { return unsupported("setSSID"); }
     IOReturn setCHANNEL(apple80211_channel_data*) override { return unsupported("setCHANNEL"); }
-    IOReturn setAWDL_SYNC_PARAMS(apple80211_awdl_sync_params *data) override { return storeRequested(requested_AWDL_SYNC_PARAMS, data, "AWDL_SYNC_PARAMS"); }
+    IOReturn setAWDL_SYNC_PARAMS(apple80211_awdl_sync_params *data) override {
+        const IOReturn result = storeRequested(requested_AWDL_SYNC_PARAMS, data, "AWDL_SYNC_PARAMS");
+        if (result == kIOReturnSuccess && data && data->version <= APPLE80211_VERSION) {
+            // Tahoe's peer manager arrives here, never at the vendor ioctl that writes ic_awdl_*:
+            // hand the plan to the follower directly, or the clock never learns macOS's numbers.
+            extern void itlAWDLSchedNoteSyncParams(unsigned, unsigned, unsigned, unsigned);
+            itlAWDLSchedNoteSyncParams(data->availability_window_length, data->availability_window_period,
+                                       data->extension_length, data->synchronization_frame_period);
+        }
+        return result;
+    }
     IOReturn setAWDL_SYNC_ENABLED(apple80211_awdl_sync_enabled *data) override;
     IOReturn setAWDL_EXTENSION_STATE_MACHINE_PARAMETERS(apple80211_awdl_extension_state_machine_parameter *data) override { return storeRequested(requested_AWDL_EXTENSION_STATE_MACHINE_PARAMETERS, data, "AWDL_EXTENSION_STATE_MACHINE_PARAMETERS"); }
     IOReturn setAWDL_ELECTION_ID(apple80211_awdl_election_id *data) override { return storeRequested(requested_AWDL_ELECTION_ID, data, "AWDL_ELECTION_ID"); }
@@ -115,6 +135,20 @@ public:
     IOReturn setAWDL_CONFIG(apple80211_awdl_config_request*) override { return unsupported("setAWDL_CONFIG"); }
 #endif
     IOReturn setAWDL_RTG_PEER_STATS_CONFIG(apple80211_rtg_peer_stats_cfg*) override { return unsupported("setAWDL_RTG_PEER_STATS_CONFIG"); }
+    // Window transitions from the plan follower land in the same client-event ring as the
+    // lifecycle entries, so the event log shows awdl0's window state the way macOS reports it.
+    void noteWindowEvent(const char *what, long result) { noteClientEvent(what, nullptr, result, false); }
+    // Master alignment: what SYNC_STATE 2/3 programmed, and whether that master is us.
+    // Nothing here elects; the answer is always "whatever macOS said".
+    bool copySyncMaster(uint8_t out[6]) {
+        if (!nativeState.syncMasterKnown())
+            return false;
+        memcpy(out, nativeState.syncMaster(), 6);
+        return true;
+    }
+    bool isNativeSyncMaster() {
+        return nativeState.isSyncMaster(localFrameAddress);
+    }
 private:
     void noteClientEvent(const char *what, IOService *client, long result, bool trace);
     static constexpr unsigned clientEventCapacity = 12;
@@ -125,6 +159,13 @@ private:
     IOLock *configurationLock = nullptr;
     AwNativeFrameTemplate frameTemplate;
     uint8_t localFrameAddress[6] = {};
+    // #85: the BSD ifnet macOS gave us, so a new awdl0 address reaches ifconfig as well as the
+    // frames we build. Held only between prepareBSDInterface and finalizeBSDInterface.
+    struct __ifnet *bsdIfnet = nullptr;
+    unsigned addressSetCalls = 0, addressSetRejected = 0, addressSetChanged = 0;
+    bool keepRequestedAddress = false;
+    // Set once macOS has given us an address, so bring-up does not seed over it afterwards.
+    bool addressFromHost = false;
     bool dataCopyProbeEnabled = false;
     unsigned dataCopyAttempts = 0, dataCopySuccess = 0;
     bool dataDeliverEnabled = false;
@@ -159,6 +200,10 @@ private:
     };
     TransmitHoldQueue transmitHoldQueues[transmitHoldQueueCount];
     unsigned transmitHeldStashed = 0, transmitHeldReleased = 0, transmitHeldDropped = 0;
+    // #89: highest number of frames parked across all side queues at once, and how many of those
+    // parked frames later reached the radio. Upstream reports the same two numbers as
+    // TxParkedPeak / TxPassedParked; the peak is what shows the mechanism was doing work.
+    unsigned transmitHeldPeak = 0;
     // Non-head-of-line blocking: a frame for a held peer moves to its side queue (see
     // transmitHoldQueues) instead of pinning the FIFO head, so the pump keeps serving
     // every other peer. Side queues drain, oldest first, before the ring is scanned.

@@ -15,6 +15,7 @@
 #include <mach/mach_time.h>
 #include "IntelBTPatcherPatches.hpp"
 #include "IntelBTPatcherHci.hpp"
+#include "IntelBTPVerify.hpp"
 
 // ---- boot switches ---------------------------------------------------------------------
 // The page rewrites run unless -btlenoscan is given; everything else here is opt-in.
@@ -28,6 +29,9 @@ static bool parkOn {};
 // failures are the expected baseline rather than a regression of ours. -ibtpwiden experiments with
 // the widened initiating window.
 static bool widenOn {};
+// Filter_Duplicates is cleared on both scan enables by default since 2.4.8 (see
+// clearScanDuplicates); -btleadvdupfilter keeps the firmware's filter.
+static bool nodupFilterOn {};
 // -ibtpprivacy: OR the LL Privacy bit (bit 6 of the feature word) into the answer to LE Read Local
 // Supported Features. Observation always happens; the rewrite needs the flag. bluetoothd only uses
 // the controller's resolving list when that bit is set, and on this controller it never is - which
@@ -86,13 +90,64 @@ static uint64_t monotonicNs() {
 // Applied as the pages are validated, the way BlueToolFixup does it. Lilu's onProcLoad route was
 // tried first and never applied to this process.
 static mach_vm_address_t csValidateOrig {};
+// Pages of the file that reached the hook, and of those the ones the kernel had already refused. The
+// second number is worth watching: it is the visible sign of a page that no longer matches the
+// signature its build shipped with, which the kernel answers with SIGBUS in the faulting task.
+static uint32_t blPages {}, blRefused {};
+// What every rewrite changed, kept page by page, so APFS's check of a reloaded block can be handed the
+// bytes that are on disk (IntelBTPVerify.hpp, #62). pagesLock also covers one page's validation:
+// pageScratch is shared, so two validations must not interleave. It is never held across an allocation
+// or a registry write.
+static Ibtp::PatchedPages *patchedPages {};
+static uint8_t *pageScratch {};
+static IOLock *pagesLock {};
+// The vnode the records belong to: a different file, or the same path mounted again, starts from empty.
+static vnode_t bluetoothdVnode {};
+static uint32_t bluetoothdVid {};
+// Reloads that would have failed the check and did not, and those that still failed.
+static uint32_t verifyRescues {}, verifyRescueFailures {};
+
+// Diagnostic counters. Only ever called from the validation hook, where a registry write is safe.
+static void publishPageFixState() {
+    if (!patchedPages)
+        return;
+    publishValue("IbtpBlPatchedPages", uint32_t(patchedPages->count));
+    publishValue("IbtpBlPatchedPagesFull", patchedPages->full);
+    publishValue("IbtpBlRescues", __atomic_load_n(&verifyRescues, __ATOMIC_RELAXED));
+    publishValue("IbtpBlRescueFailures", __atomic_load_n(&verifyRescueFailures, __ATOMIC_RELAXED));
+}
+
 static void csValidatePageHook(vnode_t vp, memory_object_t pager, memory_object_offset_t page_offset,
                                const void *data, int *validated_p, int *tainted_p, int *nx_p) {
     char path[PATH_MAX];
     int pathlen = PATH_MAX;
+    const bool ours = vn_getpath(vp, path, &pathlen) == 0 && strcmp(path, "/usr/sbin/bluetoothd") == 0;
+    // The page as it came from disk, before this hook or BlueToolFixup's changes it. Taken before the
+    // original runs, because the original is what fills the page the mapping will use.
+    const bool keep = ours && data && patchedPages && pageScratch && pagesLock;
+    if (keep) {
+        IOLockLock(pagesLock);
+        memcpy(pageScratch, data, PAGE_SIZE);
+    }
     FunctionCast(csValidatePageHook, csValidateOrig)(vp, pager, page_offset, data, validated_p, tainted_p, nx_p);
-    if (vn_getpath(vp, path, &pathlen) != 0 || LIKELY(strcmp(path, "/usr/sbin/bluetoothd") != 0))
+    if (!ours) {
+        if (keep)
+            IOLockUnlock(pagesLock);
         return;
+    }
+    bump(blPages);
+    // A page the kernel already refused is not ours to rewrite. The mapping fails whatever this hook
+    // does, and patching it would only erase the evidence that the file and its signature had parted
+    // ways - which is exactly what a crash loop in bluetoothd looks like from the outside.
+    if (!validated_p || !*validated_p) {
+        if (keep)
+            IOLockUnlock(pagesLock);
+        const uint32_t refused = bump(blRefused);
+        IBTP_DIAG_SET(IORegistryEntry::getRegistryRoot(), "IbtpBlRefused", refused, 32);
+        if (refused == 1)
+            SYSLOG("ibtp", "a bluetoothd page was refused before the rewrite, see IbtpBlPages/IbtpBlRefused");
+        return;
+    }
     // Each set matches its own bluetoothd build only, so on any other build nothing happens.
     for (const Ibtp::RewriteSet &set : Ibtp::kSets)
         for (size_t i = 0; i < set.count; ++i) {
@@ -101,6 +156,75 @@ static void csValidatePageHook(vnode_t vp, memory_object_t pager, memory_object_
                 KernelPatcher::findAndReplace(const_cast<void *>(data), PAGE_SIZE, site.from, site.length,
                                               site.to, site.length);
         }
+    if (!keep)
+        return;
+    const uint32_t vid = vnode_vid(vp);
+    if (bluetoothdVnode != vp || bluetoothdVid != vid) {
+        patchedPages->count = 0;
+        patchedPages->full = 0;
+        bluetoothdVnode = vp;
+        bluetoothdVid = vid;
+    }
+    const bool added = Ibtp::recordPatchedPage(*patchedPages, page_offset, pageScratch,
+                                               static_cast<const uint8_t *>(data));
+    IOLockUnlock(pagesLock);
+    if (added)
+        publishPageFixState();
+}
+
+// APFS's check of file data read from disk (#62). For bluetoothd, when the buffer about to be checked
+// still holds pages as the rewrites left them, the check is handed a copy with the original bytes put
+// back; the pages bluetoothd maps keep their rewrites. Every other file, and every other kind of call,
+// goes straight through.
+//
+// decmpfs reaches the filesystem through the vnode's operation table (the kernel inlines VNOP_VERIFY
+// there), so the hook sits on apfs_vnop_verify, which takes its arguments as one struct. The trailing
+// field is from macOS 26 and is the reason this cannot be a plain fixed argument list.
+struct VerifyArgs {
+    void *desc;
+    vnode_t vp;
+    off_t foffset;
+    uint8_t *buf;
+    size_t bufsize;
+    size_t *verifyBlockSize;
+    void **verifyContext;
+    int flags;
+    vfs_context_t context;
+#if !defined(IBTP_SEQUOIA) && !defined(IBTP_SONOMA)
+    void *verifyKind;
+#endif
+};
+static mach_vm_address_t apfsVerifyOrig {};
+
+static int apfsVerifyHook(VerifyArgs *args) {
+    // Checks of file data only: no flags, or the filesystem's own context.
+    if (LIKELY(!args || args->vp != bluetoothdVnode) || !args->buf || !args->bufsize || args->foffset < 0 ||
+        (args->flags & ~2) || !pagesLock)
+        return FunctionCast(apfsVerifyHook, apfsVerifyOrig)(args);
+    IOLockLock(pagesLock);
+    const bool needed = args->vp == bluetoothdVnode && vnode_vid(args->vp) == bluetoothdVid &&
+                        Ibtp::holdsPatchedBytes(*patchedPages, uint64_t(args->foffset), args->buf, args->bufsize);
+    IOLockUnlock(pagesLock);
+    if (!needed)
+        return FunctionCast(apfsVerifyHook, apfsVerifyOrig)(args);
+    uint8_t *copy = static_cast<uint8_t *>(IOMalloc(args->bufsize));
+    if (!copy)
+        return FunctionCast(apfsVerifyHook, apfsVerifyOrig)(args);
+    memcpy(copy, args->buf, args->bufsize);
+    IOLockLock(pagesLock);
+    Ibtp::restoreOriginalBytes(*patchedPages, uint64_t(args->foffset), copy, args->bufsize);
+    IOLockUnlock(pagesLock);
+    VerifyArgs copied = *args;
+    copied.buf = copy;
+    const int error = FunctionCast(apfsVerifyHook, apfsVerifyOrig)(&copied);
+    IOFree(copy, args->bufsize);
+    if (!error) {
+        if (bump(verifyRescues) == 1)
+            SYSLOG("ibtp", "APFS checked a bluetoothd block holding rewritten pages; it got the bytes on disk");
+    } else {
+        bump(verifyRescueFailures);
+    }
+    return error;
 }
 
 // ---- HCI over USB control requests -----------------------------------------------------
@@ -145,6 +269,7 @@ static uint32_t forgeWrites {}, forgeWriteFails {}, expiredSeen {}, abortsSeen {
 static Ibtp::Park park {};
 static uint32_t parksMade {}, parksLifted {}, parkSendFails {}, createsSeen {}, watchdogLifts {},
     strayParks {}, widened {}, widenMissed {};
+static uint32_t dupCleared {}, dupSkipped {};
 // The controller's own LE feature word, from LE Read Local Supported Features, published once.
 static uint64_t featureWord {};
 static uint32_t featureReads {}, privacyPatched {}, featureWriteFails {};
@@ -711,6 +836,17 @@ static IOReturn deviceRequestHook(void *that, IOService *provider, StandardUSB::
                 }
             }
         }
+        if (nodupFilterOn) {
+            if (Ibtp::clearScanDuplicates(hci, hciLength)) {
+                if (data) {
+                    lilu_os_memcpy(data, hci, hciLength);
+                    publishValue("IbtpDupFilterCleared", ++dupCleared);
+                } else {
+                    // Same descriptor-only limit as the widen path above.
+                    publishValue("IbtpDupFilterSkipped", ++dupSkipped);
+                }
+            }
+        }
     }
     for (int i = 0; i < preCount; ++i) {
         if (sendAdded(that, provider, request, pres[i].bytes, pres[i].len, timeout) == kIOReturnSuccess) {
@@ -1079,6 +1215,9 @@ static IOReturn pipeIoHook(void *that, IOMemoryDescriptor *dataBuffer, uint32_t 
 
 static const char *usbHostPaths[] {"/System/Library/Extensions/IOUSBHostFamily.kext/Contents/MacOS/IOUSBHostFamily"};
 static KernelPatcher::KextInfo usbHostInfo {"com.apple.iokit.IOUSBHostFamily", usbHostPaths, 1, {true}, {}, KernelPatcher::KextInfo::Unloaded};
+// APFS is where the block-level check that a rewritten page breaks lives (#62).
+static const char *apfsPaths[] {"/System/Library/Extensions/apfs.kext/Contents/MacOS/apfs"};
+static KernelPatcher::KextInfo apfsInfo {"com.apple.filesystems.apfs", apfsPaths, 1, {true}, {}, KernelPatcher::KextInfo::Unloaded};
 
 static const char *bootargOff[] = {"-ibtpoff"};
 static const char *bootargDebug[] = {"-ibtpdbg"};
@@ -1109,11 +1248,15 @@ PluginConfiguration ADDPR(config) {
         scanPatchOn = !checkKernelArgument("-btlenoscan");
         parkOn = checkKernelArgument("-ibtppark");
         widenOn = checkKernelArgument("-ibtpwiden");
+        // On by default since 2.4.8: clear Filter_Duplicates on both scan enables so Apple's BTLE
+        // discovery round is not collapsed. -btleadvdupfilter keeps the firmware's filter.
+        nodupFilterOn = !checkKernelArgument("-btleadvdupfilter");
         privacyOn = checkKernelArgument("-ibtpprivacy");
         rpaOn = !checkKernelArgument("-ibtpnorpa");
         codSeedOn = !checkKernelArgument("-ibtpnocodseed");
         publishValue("IbtpParkEnabled", parkOn ? 1 : 0);
         publishValue("IbtpWidenEnabled", widenOn ? 1 : 0);
+        publishValue("IbtpDupFilterDisabled", nodupFilterOn ? 1 : 0);
         publishValue("IbtpPrivacyEnabled", privacyOn ? 1 : 0);
         publishValue("IbtpRpaEnabled", rpaOn ? 1 : 0);
         publishValue("IbtpCodSeedEnabled", codSeedOn ? 1 : 0);
@@ -1123,7 +1266,7 @@ PluginConfiguration ADDPR(config) {
         // would have failed the injection quietly. So the bundle version was frozen at 2.4.2 while
         // the in-flight iteration lived here and in the archive name; this finalized build moves
         // the real version to 2.4.3.
-        IORegistryEntry::getRegistryRoot()->setProperty("IbtpBuild", "2.4.7");
+        IORegistryEntry::getRegistryRoot()->setProperty("IbtpBuild", "2.4.8");
         // Arm the feature-word watch here, not when an ask shows up: the ask is a host command this
         // hook may never be called for, and arming on it left the watch dead for the whole boot when
         // it never came - indistinguishable from "the answer is not on a read". Reads inside the
@@ -1138,6 +1281,38 @@ PluginConfiguration ADDPR(config) {
             if (!patcher.routeMultipleLong(KernelPatcher::KernelID, &route, 1))
                 SYSLOG("ibtp", "failed to route cs validation");
         });
+        // The integrity fix needs somewhere to keep the bytes that are on disk; without it the rewrites
+        // still run, they just leave the crash of #62 in place, as before 2.4.8's fixes.
+        pagesLock = IOLockAlloc();
+        patchedPages = static_cast<Ibtp::PatchedPages *>(IOMalloc(sizeof(Ibtp::PatchedPages)));
+        pageScratch = static_cast<uint8_t *>(IOMalloc(PAGE_SIZE));
+        if (patchedPages)
+            memset(patchedPages, 0, sizeof(Ibtp::PatchedPages));
+        if (!pagesLock || !patchedPages || !pageScratch) {
+            SYSLOG("ibtp", "no memory for the page integrity fix, the rewrites go on without it");
+            if (patchedPages)
+                IOFree(patchedPages, sizeof(Ibtp::PatchedPages));
+            if (pageScratch)
+                IOFree(pageScratch, PAGE_SIZE);
+            if (pagesLock)
+                IOLockFree(pagesLock);
+            patchedPages = nullptr;
+            pageScratch = nullptr;
+            pagesLock = nullptr;
+        } else {
+            // Routed on its own: if it fails, bluetoothd is still rewritten, exactly as before.
+            lilu.onKextLoadForce(&apfsInfo, 1, [](void *, KernelPatcher &patcher, size_t index, mach_vm_address_t address, size_t size) {
+                if (index != apfsInfo.loadIndex)
+                    return;
+                KernelPatcher::RouteRequest route("_apfs_vnop_verify", apfsVerifyHook, apfsVerifyOrig);
+                const bool routed = patcher.routeMultipleLong(index, &route, 1, address, size);
+                if (!routed) {
+                    SYSLOG("ibtp", "failed to route the APFS integrity check");
+                    patcher.clearError();
+                }
+                publishValue("IbtpBlVerifyHook", routed ? 1 : 0);
+            });
+        }
         mirrorLock = IOLockAlloc();
         featureLock = IOSimpleLockAlloc();
         if (!featureLock)

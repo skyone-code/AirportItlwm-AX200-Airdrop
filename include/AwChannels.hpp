@@ -26,4 +26,16 @@ inline uint8_t globalOperatingClass20(uint8_t channel) {
 // Flags byte of a legacy channel-sequence slot: 0x2b carries the 2.4 GHz band bit, 0x1b the 5 GHz one.
 inline uint8_t legacySlotFlags(uint8_t channel) { return channel <= 14 ? 0x2b : 0x1b; }
 
+// The wide mapping macOS's channel sequence is transcribed with: every channel the sequence may
+// name gets a class, unlike the fixed-schedule whitelist above. Matches the mapping a captured
+// Apple chan-seq uses (2.4G 81, 36-48 115, 52-64 118, 100-144 121, everything above 124).
+inline uint8_t chanSeqOpClass(uint8_t channel) {
+    if (!channel) return 0;
+    if (channel <= 13) return 81;
+    if (channel <= 48) return 115;
+    if (channel <= 64) return 118;
+    if (channel <= 144) return 121;
+    return 124;
+}
+
 }

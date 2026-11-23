@@ -354,6 +354,12 @@ public:
     static void    awdlRxTask(void *);
     static void    awdlCoexCycleTimeout(void *);
     static void    awdlCoexCycleTask(void *);
+    static void    awdlSchedProtSend(struct iwx_softc *, uint32_t);
+    static void    awdlSchedProtStop(struct iwx_softc *);
+    static void    awdlSchedSlotTimeout(void *);
+    static void    awdlSchedSlotTask(void *);
+    static int     awdlSchedHopPhy(struct iwx_softc *, struct ieee80211_channel *);
+    static void    awdlSchedHopWindow(struct iwx_softc *, bool, uint64_t);
     static void    awdlCoexBootTask(void *);
     static void    awdlCoexBootTimeout(void *);
     static void    awdlCoexHoldTimeout(void *);
@@ -460,7 +466,7 @@ public:
     int    iwx_scan_abort(struct iwx_softc *);
     int    iwx_rs_rval2idx(uint8_t);
     uint16_t iwx_rs_ht_rates(struct iwx_softc *, struct ieee80211_node *, int);
-    uint16_t iwx_rs_fw_get_config_flags(struct iwx_softc *sc);
+    uint16_t iwx_rs_fw_get_config_flags(struct iwx_softc *sc, struct ieee80211_node *ni);
     int    iwx_rs_init(struct iwx_softc *, struct iwx_node *, bool update);
     void iwx_rs_update(struct iwx_softc *sc, struct iwx_tlc_update_notif *notif);
     int    iwx_enable_mgmt_queue(struct iwx_softc *);
@@ -475,6 +481,8 @@ public:
     int    awdlCoexTxTeardown(struct iwx_softc *);
     void   awdlCoexTxSend(struct iwx_softc *);
     void   awdlCoexCountryAnswer(struct iwx_softc *);
+    // #90: ask the firmware for its current country when no notice ever arrives.
+    void   awdlCoexCountryPoll(struct iwx_softc *);
     void   awdlCoexRetarget(struct iwx_softc *);
     void   awdlCoexDataPump(struct iwx_softc *, unsigned budget = ~0U);
     void   awdlCoexBaHandleSlot(struct iwx_softc *, unsigned slot);

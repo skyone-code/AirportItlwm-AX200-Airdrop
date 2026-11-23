@@ -453,6 +453,26 @@ struct ieee80211com {
     uint64_t ic_wcl_rx_packets[4];
 #endif
     /*
+     * The AWDL availability plan macOS asked for, in TU, straight from
+     * APPLE80211_IOC_AWDL_SYNC_PARAMS. macOS owns this plan: its own Wi-Fi
+     * driver follows it, and every Apple peer schedules its sends into the
+     * windows we announce, so the driver must describe the plan it really runs
+     * instead of picking periods of its own. Zero means macOS has not asked for
+     * anything yet and the driver keeps its derived values.
+     */
+    uint16_t ic_awdl_aw_length;		/* availability_window_length */
+    uint16_t ic_awdl_aw_period;		/* availability_window_period */
+    uint16_t ic_awdl_ext_length;	/* extension_length */
+    uint16_t ic_awdl_sync_period;	/* synchronization_frame_period */
+    /*
+     * -itlawdlsched: actually use that plan for the schedule we emit and the
+     * slot phase the driver accounts against, instead of our own 16/110
+     * constants. Separate from the fields above because the fields are always
+     * recorded (they cost nothing and are what the telemetry reports), while
+     * acting on them changes what peers see.
+     */
+    bool ic_awdl_follow_plan;
+    /*
      * Channel of the BSS a join request named (0 = unknown).  The next scan
      * covers only this channel; it is cleared when that scan is started.
      * A full sweep takes nearly the system's ~4 s association timeout, and the

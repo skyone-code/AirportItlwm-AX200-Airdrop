@@ -214,7 +214,8 @@ ieee80211_channel_init(struct _ifnet *ifp)
         }
     }
     /* validate ic->ic_curmode */
-    if ((ic->ic_modecaps & (1<<ic->ic_curmode)) == 0)
+    if (ic->ic_curmode > IEEE80211_MODE_11AX ||
+        (ic->ic_modecaps & (1<<ic->ic_curmode)) == 0)
         ic->ic_curmode = IEEE80211_MODE_AUTO;
     ic->ic_des_chan = IEEE80211_CHAN_ANYC;    /* any channel is ok */
 }
@@ -1175,7 +1176,14 @@ ieee80211_setmode(struct ieee80211com *ic, enum ieee80211_phymode mode)
     u_int modeflags;
     int i;
     
-    /* validate new mode */
+    /* validate new mode. Range first: `1 << mode` is undefined for a mode outside the enum, and a
+       mode that far out only ever comes from a damaged caller -- a struct-layout mismatch between
+       stale object files after a swapped kext once reached the panic below as "unexpected mode
+       32768" and cost a boot. Refusing the mode is a diagnostic; panicking is not. */
+    if (mode < 0 || mode >= (int)nitems(chanflags)) {
+        XYLog("%s: mode %d out of range (caps 0x%x)\n", __func__, mode, ic->ic_modecaps);
+        return EINVAL;
+    }
     if ((ic->ic_modecaps & (1<<mode)) == 0) {
         DPRINTF(("mode %u not supported (caps 0x%x)\n",
                  mode, ic->ic_modecaps));
@@ -1186,8 +1194,6 @@ ieee80211_setmode(struct ieee80211com *ic, enum ieee80211_phymode mode)
      * Verify at least one channel is present in the available
      * channel list before committing to the new mode.
      */
-    if (mode >= nitems(chanflags))
-        panic("%s: unexpected mode %u", __func__, mode);
     modeflags = chanflags[mode];
     for (i = 0; i <= IEEE80211_CHAN_MAX; i++) {
         c = &ic->ic_channels[i];

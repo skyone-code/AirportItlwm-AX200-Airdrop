@@ -25,6 +25,12 @@ inline IOReturn awGetInactiveState(apple80211_awdl_sync_state *data)
 // behaves exactly as the inactive functions above. With accept on, it records the
 // request and reports it back so reads and writes agree. Accepting does NOT mean
 // this driver synchronizes, elects or hops: this only lets the native stack stay up.
+//
+// Master alignment (0.7-equivalent): states 2 and 3 are the peer manager announcing
+// the elected master; the Tahoe struct carries its address at +8. There is no election
+// algorithm on our side at all - the master is whatever macOS programmed, and a zero
+// address or our own address means we are it. The frame writer decides what goes on
+// the air with this.
 class AwNativeNativeState {
 public:
     bool accept = false;
@@ -45,9 +51,20 @@ public:
         return kIOReturnSuccess;
     }
     IOReturn setState(const apple80211_awdl_sync_state *data) {
-        const IOReturn result = awSetInactiveState(data);
-        if (result == kIOReturnBadArgument || (result == kIOReturnUnsupported && !accept))
-            return result;
+        if (!data || data->version > APPLE80211_VERSION || data->state < 1 || data->state > 3)
+            return kIOReturnBadArgument;
+        if (!accept)
+            return data->state == 1 ? kIOReturnSuccess : kIOReturnUnsupported;
+        if (data->state == 2 || data->state == 3) {
+            // The master announcement: keep the address, even a zero one ("no master
+            // programmed" is itself a state the frame writer must be able to see).
+            static_assert(sizeof(data->address) == 6, "Tahoe sync state layout");
+            for (unsigned i = 0; i < 6; ++i)
+                master[i] = data->address[i];
+            hasMaster = true;
+        } else {
+            hasMaster = false;
+        }
         state = data->state;
         return kIOReturnSuccess;
     }
@@ -57,9 +74,20 @@ public:
             data->state = state;
         return result;
     }
+    // "I am the master": nothing programmed, or macOS programmed our own address.
+    bool isSyncMaster(const uint8_t self[6]) const {
+        static const uint8_t zero[6] = {};
+        if (!hasMaster)
+            return true;
+        return !memcmp(master, zero, 6) || !memcmp(master, self, 6);
+    }
+    bool syncMasterKnown() const { return hasMaster; }
+    const uint8_t *syncMaster() const { return master; }
 private:
     bool enabled = false;
     uint32_t state = 1;
+    uint8_t master[6] = {};
+    bool hasMaster = false;
 };
 
 class AwNativeFrameTemplate {

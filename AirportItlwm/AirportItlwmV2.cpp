@@ -196,6 +196,16 @@ extern unsigned itlAWDLFixedChannel();
 extern unsigned itlAWDLChannelClass();
 extern bool awBuildAllowed();
 extern const char *awBuildStatus();
+// Plan follower, driven in the hal (ItlIwx.cpp): Follows() is "the plan is running and past its
+// stability gate", InWindow() is "we are inside an availability window right now".
+extern bool itlAWDLSchedFollows();
+extern bool itlAWDLSchedInWindow();
+extern void itlAWDLSchedNotePlanSeq(const uint8_t *entries, unsigned slots);
+// Sync and multicast only leave inside the plan's availability window. Without a plan this stays
+// exactly the old behaviour. Counters are published from here because the writer owns the frames.
+static uint32_t awdlSyncHeldOutside, awdlSyncInWindow, awdlSyncMISigChanges;
+static bool awdlSyncLastInWin, awdlSyncForceMI;
+static uint8_t awdlSyncMISig[16];
 // With -itlawdlcaps the driver reports two HT streams and VHT to macOS; our TLV 7 says the same.
 static bool itlAWDLTwoStreams()
 {
@@ -300,6 +310,18 @@ IOReturn AwNativeInterface::copyFrameConfiguration(FrameConfiguration *output)
         output->hasRequestedTiming = status == kIOReturnSuccess;
         memcpy(output->address, localFrameAddress, sizeof(localFrameAddress));
         output->templateLength = length;
+        // The channel sequence ioctl's bytes, decoded from their raw layout (the header struct's
+        // field list is stale; see AwChanSeqPlan). Stored verbatim: the frame writer decides
+        // whether to announce it, and the schedule consumer decides how to act on it.
+        apple80211_awdl_sync_channel_sequence chanSeq = {};
+        const IOReturn chanSeqStatus = requested_AWDL_SYNCHRONIZATION_CHANNEL_SEQUENCE.get(&chanSeq);
+        output->hasChanSeqPlan = chanSeqStatus == kIOReturnSuccess &&
+            Aw::awBuildChanSeqPlan(reinterpret_cast<const uint8_t *>(&chanSeq), sizeof(chanSeq),
+                                   &output->chanSeqPlan);
+        // The plan follower's hop reads macOS's own slots: every re-send of the sequence
+        // refreshes them, and a cleared sequence drops them until the next one arrives.
+        extern void itlAWDLSchedNoteNativeSlots(const uint8_t *channels);
+        itlAWDLSchedNoteNativeSlots(output->hasChanSeqPlan ? output->chanSeqPlan.slotChan : nullptr);
     }
     IOLockUnlock(configurationLock);
     return result;
@@ -572,6 +594,13 @@ bool AwNativeInterface::popTransmit(uint8_t *output, size_t available, size_t *w
                     --transmitQueued;
                     ++transmitPopped;
                     ++transmitHeldStashed;
+                    // #89: peak number parked across all side queues, the number that shows the
+                    // mechanism was actually carrying traffic away from the FIFO head.
+                    unsigned parked = 0;
+                    for (const auto &held : transmitHoldQueues)
+                        parked += held.count;
+                    if (parked > transmitHeldPeak)
+                        transmitHeldPeak = parked;
                     // One frame matches one peer: stop here or a transient duplicate hold
                     // entry (a peer moving between slots) would stash the same frame twice.
                     break;
@@ -615,6 +644,8 @@ bool AwNativeInterface::serviceTransmit()
         ITL_DIAG_SET(this, "AwIfTxHeldStashed", transmitHeldStashed, 32);
         ITL_DIAG_SET(this, "AwIfTxHeldReleased", transmitHeldReleased, 32);
         ITL_DIAG_SET(this, "AwIfTxHeldDropped", transmitHeldDropped, 32);
+        ITL_DIAG_SET(this, "AwIfTxHeldPeak", transmitHeldPeak, 32);
+        ITL_DIAG_SET(this, "AwIfTxHeldShort", transmitHeldShort, 32);
         if (auto *depths = OSData::withBytes(transmitDepthBins, sizeof(transmitDepthBins))) {
             ITL_DIAG_SET(this, "AwIfTxDepthBins", depths);
             depths->release();
@@ -776,6 +807,71 @@ void AwNativeInterface::finalizeBSDInterface(struct __ifnet *interface, unsigned
 }
 #endif
 
+#if __IO80211_TARGET == __MAC_26_0
+// #85: the same two hooks on Tahoe. Only the ifnet pointer is new here; the frameworks' own
+// work is still done by the base implementation, unchanged and in the same order.
+IOReturn AwNativeInterface::prepareBSDInterface(struct __ifnet *interface, unsigned int flags)
+{
+    bsdIfnet = interface;
+    const IOReturn result = IO80211VirtualInterface::prepareBSDInterface(interface, flags);
+    noteClientEvent("prepare-bsd", nullptr, long(result), false);
+    return result;
+}
+
+void AwNativeInterface::finalizeBSDInterface(struct __ifnet *interface, unsigned int flags)
+{
+    if (bsdIfnet == interface)
+        bsdIfnet = nullptr;
+    noteClientEvent("finalize-bsd", nullptr, long(flags), true);
+    IO80211VirtualInterface::finalizeBSDInterface(interface, flags);
+}
+#endif
+
+#if __IO80211_TARGET != __MAC_14_4
+IOReturn AwNativeInterface::setMacAddress(ether_addr &address)
+{
+    // #85: macOS gives awdl0 a fresh randomised address at boot and again after Wi-Fi is toggled,
+    // and expects the driver to use it. The old override answered "unsupported", so the interface
+    // kept the factory address while macOS believed it had its own -- and every AWDL frame we build
+    // carried the old source, because localFrameAddress is what goes into every one of them.
+    // Accepted now, with the same three refusals Apple's driver applies (all-zero, broadcast,
+    // multicast). -itlawdladdrkeep restores the refusal for an A/B boot.
+    ++addressSetCalls;
+    const uint8_t *bytes = reinterpret_cast<const uint8_t *>(&address);
+    static const uint8_t allZero[sizeof(localFrameAddress)] = {};
+    static const uint8_t allOnes[sizeof(localFrameAddress)] = {
+        0xff, 0xff, 0xff, 0xff, 0xff, 0xff
+    };
+    const bool invalid = memcmp(bytes, allZero, sizeof(localFrameAddress)) == 0 ||
+        memcmp(bytes, allOnes, sizeof(localFrameAddress)) == 0 || (bytes[0] & 1);
+    // The boot argument is read here as well as at bring-up: macOS can hand the address over before
+    // initializeNetwork has run, and the flag has to hold from the first call.
+    int addressKeepArgument = 0;
+    const bool keep = keepRequestedAddress ||
+        PE_parse_boot_argn("-itlawdladdrkeep", &addressKeepArgument, sizeof(addressKeepArgument));
+    if (invalid || keep) {
+        ++addressSetRejected;
+        ITL_DIAG_SET(this, "AwIfAddressSetCalls", addressSetCalls, 32);
+        ITL_DIAG_SET(this, "AwIfAddressSetRejected", addressSetRejected, 32);
+        noteClientEvent("address-refused", nullptr, invalid ? kIOReturnBadArgument : kIOReturnUnsupported, false);
+        return invalid ? kIOReturnBadArgument : kIOReturnUnsupported;
+    }
+    if (memcmp(localFrameAddress, bytes, sizeof(localFrameAddress))) {
+        ++addressSetChanged;
+        memcpy(localFrameAddress, bytes, sizeof(localFrameAddress));
+        addressFromHost = true;
+    }
+    ITL_DIAG_SET(this, "AwIfAddressSetCalls", addressSetCalls, 32);
+    ITL_DIAG_SET(this, "AwIfAddressSetChanged", addressSetChanged, 32);
+    // The BSD side follows when we hold the ifnet; without one the framework keeps its own record,
+    // and the frames we build are what a peer actually sees either way.
+    if (bsdIfnet)
+        ifnet_set_lladdr(bsdIfnet, bytes, IEEE80211_ADDR_LEN);
+    setProperty(kIOMACAddress, const_cast<uint8_t *>(bytes), sizeof(localFrameAddress));
+    return kIOReturnSuccess;
+}
+#endif
+
 void AwNativeInterface::stop(IOService *provider)
 {
     const bool started = nativeStarted;
@@ -821,8 +917,12 @@ IOReturn AwNativeInterface::initializeNetwork(IO80211Controller *controller,
     if (!configurationLock)
         return kIOReturnNoMemory;
     static_assert(sizeof(address) == sizeof(localFrameAddress), "native AWDL address size");
-    memcpy(localFrameAddress, &address, sizeof(localFrameAddress));
+    // #85: an address macOS already handed over is the one to keep. Bring-up only seeds the
+    // factory address when nothing has been set from the host yet.
+    if (!addressFromHost)
+        memcpy(localFrameAddress, &address, sizeof(localFrameAddress));
     int dataCopyArgument = 0;
+    keepRequestedAddress = PE_parse_boot_argn("-itlawdladdrkeep", &dataCopyArgument, sizeof(dataCopyArgument));
     dataCopyProbeEnabled = PE_parse_boot_argn("-itlawdldatacopy", &dataCopyArgument, sizeof(dataCopyArgument));
     // -itlawdlcoexdata used to be the opt-in for the listener data path (normal Wi-Fi with the
     // listener); it needs delivery, transmit and the queues enabled too. The coex stack is on
@@ -1117,6 +1217,17 @@ IOReturn AirportItlwm::buildAWDLSyncProbe(mbuf_t *packet, uint64_t nowUS)
             !awdlManagementInputEnabled ? "controller-not-ready" : "no-native-interface");
         return kIOReturnNotReady;
     }
+    // Sync frames only leave inside the plan's availability window. Outside it, macOS's own
+    // device stays quiet too; holding here keeps our sync traffic off the peer's data slots.
+    if (itlAWDLSchedFollows()) {
+        if (!itlAWDLSchedInWindow()) {
+            ++awdlSyncHeldOutside;
+            ITL_DIAG_SET(this, "AwIfSyncHeldOutside", awdlSyncHeldOutside, 32);
+            return kIOReturnNotReady;
+        }
+        ++awdlSyncInWindow;
+        ITL_DIAG_SET(this, "AwIfSyncInWindow", awdlSyncInWindow, 32);
+    }
     auto *snapshot = IONew(AwNativeInterface::FrameConfiguration, 1);
     if (!snapshot) {
         ITL_DIAG_SET(this, "AwIfSyncProbeStage", "no-memory");
@@ -1124,10 +1235,16 @@ IOReturn AirportItlwm::buildAWDLSyncProbe(mbuf_t *packet, uint64_t nowUS)
     }
     auto *interface = static_cast<AwNativeInterface *>(fAWDLInterface);
     interface->retain();
+    uint8_t nativeMaster[6];
     const auto status = interface->copyFrameConfiguration(snapshot);
+    // Read before release; the object outlives the call, but nothing here should depend on that.
+    const bool haveNativeMaster = interface->copySyncMaster(nativeMaster);
+    const bool nativeMasterIsSelf = !haveNativeMaster ||
+        !memcmp(nativeMaster, snapshot->address, 6);
     // Alternate the peer manager's service-carrying MI with sync-only PSF frames.
     // On any problem with the MI, this stays an ordinary frame.
-    const bool wantMI = awdlProbeSequence & 1;
+    const bool wantMI = (awdlProbeSequence & 1) || awdlSyncForceMI;
+    awdlSyncForceMI = false;
     size_t miLength = 0;
     const bool isMI = status == kIOReturnSuccess && wantMI &&
         interface->copyMasterIndication(snapshot->staticTLVs, sizeof(snapshot->staticTLVs), &miLength);
@@ -1138,6 +1255,16 @@ IOReturn AirportItlwm::buildAWDLSyncProbe(mbuf_t *packet, uint64_t nowUS)
         ++awdlSyncMIWanted;
         if (!isMI)
             ++awdlSyncMIMissing;
+    }
+    if (isMI) {
+        // A changed master indication (a new election winner) goes out on the very next
+        // frame instead of waiting for its turn in the alternation.
+        if (memcmp(awdlSyncMISig, snapshot->staticTLVs, sizeof(awdlSyncMISig))) {
+            memcpy(awdlSyncMISig, snapshot->staticTLVs, sizeof(awdlSyncMISig));
+            ++awdlSyncMISigChanges;
+            awdlSyncForceMI = true;
+            ITL_DIAG_SET(this, "AwIfSyncMISigChanges", awdlSyncMISigChanges, 32);
+        }
     }
     interface->release();
     if (status != kIOReturnSuccess) {
@@ -1156,7 +1283,13 @@ IOReturn AirportItlwm::buildAWDLSyncProbe(mbuf_t *packet, uint64_t nowUS)
     for (size_t off = 0; off < snapshot->templateLength;) {
         if (snapshot->templateLength-off < 3) { valid = false; break; }
         const size_t count = Aw::read16(snapshot->staticTLVs+off+1);
-        if (count > snapshot->templateLength-off-3 || (!isMI && snapshot->staticTLVs[off] == 18)) {
+        if (count > snapshot->templateLength-off-3) {
+            valid = false; break;
+        }
+        if (!isMI && snapshot->staticTLVs[off] == 18) {
+            // Still refused on this fixed-channel test, but the plan inside feeds the
+            // scheduler's slot map so the follow logic sees what the peer advertised.
+            itlAWDLSchedNotePlanSeq(snapshot->staticTLVs+off+3, unsigned(count/2));
             valid = false; break;
         }
         off += 3+count;
@@ -1167,10 +1300,14 @@ IOReturn AirportItlwm::buildAWDLSyncProbe(mbuf_t *packet, uint64_t nowUS)
     if (valid && awdlHideInfra && Aw::stripDataPathInfra(snapshot->staticTLVs, &snapshot->templateLength))
         ++awdlSyncInfraStripped;
     // After the check above, which still refuses a native channel-sequence TLV.
+    // -itlawdlchanseq: the appended TLV 18 carries macOS's own sequence from the chan-seq ioctl
+    // (its zero-channel slots mean "on the infrastructure channel") instead of the fixed slate.
+    const Aw::AwChanSeqPlan *chanSeqPlan =
+        awdlChanSeq && snapshot->hasChanSeqPlan ? &snapshot->chanSeqPlan : nullptr;
     if (valid && !isMI && awdlExtendFrames &&
         !Aw::extendWithPeerTLVs(snapshot->staticTLVs, &snapshot->templateLength,
                                      sizeof(snapshot->staticTLVs), snapshot->address, uint8_t(itlAWDLFixedChannel()),
-                                     uint8_t(itlAWDLChannelClass()), itlAWDLTwoStreams()))
+                                     uint8_t(itlAWDLChannelClass()), itlAWDLTwoStreams(), chanSeqPlan))
     {
         ITL_DIAG_SET(this, "AwIfPeerTLVs", "not-added");
         ++awdlSyncPeerTLVsRefused;
@@ -1179,6 +1316,54 @@ IOReturn AirportItlwm::buildAWDLSyncProbe(mbuf_t *packet, uint64_t nowUS)
     const uint8_t fixedChannel = uint8_t(itlAWDLFixedChannel());
     Aw::SyncPrefix settings = {fixedChannel,fixedChannel,0,0,16,110,0x1000,16,16,0,3,3,3,3,{}};
     memcpy(settings.master, snapshot->address, 6);
+    // Master alignment: the peer manager's SYNC_STATE 2/3 names the elected master. Announce
+    // that master on the air, not ourselves, unless it is us or nothing was programmed. This
+    // is the whole election story: no comparison runs here, ever.
+    if (haveNativeMaster && !nativeMasterIsSelf) {
+        memcpy(settings.master, nativeMaster, 6);
+        ITL_DIAG_SET(this, "AwIfSyncMasterFollowed", true);
+    } else
+        ITL_DIAG_SET(this, "AwIfSyncMasterFollowed", false);
+    // 16/110 above is a capture constant: 16 TU window inside a 16 TU period, i.e. always present, which
+    // is a claim no real Apple device makes. With -itlawdlsched the numbers macOS states in
+    // setAWDL_SYNC_PARAMS replace them. The native snapshot is preferred over ic because it was read
+    // under this same gate for the very frame being built; ic is the fallback for the case where macOS
+    // pushed the plan but the interface has no template yet.
+    struct ieee80211com *awIc = fHalService ? fHalService->get80211Controller() : nullptr;
+    const bool followPlan = awIc && awIc->ic_awdl_follow_plan;
+    bool timingApplied = false;
+    if (followPlan) {
+        const auto clampTU = [](uint32_t v) -> uint16_t { return uint16_t(v > 0xffff ? 0xffff : v); };
+        Aw::RequestedTiming timing = {};
+        if (snapshot->hasRequestedTiming) {
+            timing.awLength = clampTU(snapshot->parameters.availability_window_length);
+            timing.awPeriod = clampTU(snapshot->parameters.availability_window_period);
+            timing.extensionLength = clampTU(snapshot->parameters.extension_length);
+            timing.syncPeriod = clampTU(snapshot->parameters.synchronization_frame_period);
+        } else {
+            timing.awLength = awIc->ic_awdl_aw_length;
+            timing.awPeriod = awIc->ic_awdl_aw_period;
+            timing.extensionLength = awIc->ic_awdl_ext_length;
+            timing.syncPeriod = awIc->ic_awdl_sync_period;
+        }
+        timingApplied = Aw::applyRequestedTiming(settings, timing);
+    }
+    ITL_DIAG_SET(this, "AwIfScheduleFollowPlan", followPlan);
+    ITL_DIAG_SET(this, "AwIfScheduleFromPlan", timingApplied);
+    ITL_DIAG_SET(this, "AwIfScheduleAwPeriod", settings.awPeriod, 32);
+    ITL_DIAG_SET(this, "AwIfScheduleAwLength", settings.commonLength, 32);
+    ITL_DIAG_SET(this, "AwIfScheduleExtLength", settings.extensionLength, 32);
+    ITL_DIAG_SET(this, "AwIfScheduleSyncPeriod", settings.afPeriod, 32);
+    // Availability-window transitions are lifecycle events: the native interface's event log
+    // records them the way macOS logs awdl0's window state for its clients.
+    if (followPlan && timingApplied) {
+        const bool inWin = itlAWDLSchedFollows() && itlAWDLSchedInWindow();
+        if (inWin != awdlSyncLastInWin) {
+            awdlSyncLastInWin = inWin;
+            static_cast<AwNativeInterface *>(fAWDLInterface)->noteWindowEvent(
+                inWin ? "aw-window-start" : "aw-window-end", long(settings.awPeriod));
+        }
+    }
     const auto schedule = Aw::buildLocalFixedSchedule(settings, 0, nowUS, 0,
         sync, sizeof(sync), &syncLength);
     mbuf_t result = nullptr;
@@ -1367,6 +1552,13 @@ void AirportItlwm::releaseAll()
     // First, while the command gate the power calls use still exists.
     unregistPM();
     // The watchdog uses the HAL and the gate, both released below.
+    if (enableTimer) {
+        enableTimer->cancelTimeout();
+        if (fWatchdogWorkLoop)
+            fWatchdogWorkLoop->removeEventSource(enableTimer);
+        enableTimer->release();
+        enableTimer = nullptr;
+    }
     if (watchdogTimer) {
         watchdogTimer->cancelTimeout();
         if (fWatchdogWorkLoop)
@@ -1525,6 +1717,10 @@ bool AirportItlwm::init(OSDictionary *properties)
     awdlExtendFrames = !PE_parse_boot_argn("-itlawdlnoelicit", &awdlBootValue, sizeof(awdlBootValue));
     awdlHideInfra = PE_parse_boot_argn("-itlawdlhideinfra", &awdlBootValue, sizeof(awdlBootValue));
     ITL_DIAG_SET(this, "AwIfHideInfra", awdlHideInfra);
+    // On by default since 2.5.18: decode macOS's AWDL channel-sequence plan for per-slot following.
+    // -itlawdlnochanseq turns it off.
+    awdlChanSeq = !PE_parse_boot_argn("-itlawdlnochanseq", &awdlBootValue, sizeof(awdlBootValue));
+    ITL_DIAG_SET(this, "AwIfChanSeq", awdlChanSeq);
     awdlCreateRequests = 0;
     awdlManagementInputEnabled = false;
     awdlManagementActive = 0;
@@ -1818,8 +2014,14 @@ bool AirportItlwm::startDriver(IOService *provider)
 
 #ifdef AIRPORT_WCL
     itlMccProbeReadBios(pciNub);
+    // PE_parse_boot_argn matches the caller's name against the boot arg token *including* its
+    // leading '-', so "-itlwm_he" is the form that finds nvram's "-itlwm_he=1". An undashed name
+    // only matches a boot arg written without the dash ("itlwm_he=1"). For a dashed token the
+    // parser ignores "=value" and always stores 1, hence the explicit == 1 check below.
     int he_enabled = 0;
-    if (PE_parse_boot_argn("itlwm_he", &he_enabled, sizeof(he_enabled)) && he_enabled == 1)
+    if ((PE_parse_boot_argn("-itlwm_he", &he_enabled, sizeof(he_enabled)) ||
+         PE_parse_boot_argn("itlwm_he", &he_enabled, sizeof(he_enabled))) &&
+        he_enabled == 1)
         fHalService->get80211Controller()->ic_userflags |= IEEE80211_F_HEON;
 #endif
 
@@ -1851,6 +2053,14 @@ bool AirportItlwm::startDriver(IOService *provider)
         return false;
     }
     fWatchdogWorkLoop->addEventSource(watchdogTimer);
+    // #38: the wake replay. Same work loop as the watchdog, so its action is serialized with the
+    // interrupt and request paths. If it cannot be created the deferral is simply not offered and
+    // enableAdapter behaves as before.
+    enableTimer = IOTimerEventSource::timerEventSource(this, OSMemberFunctionCast(IOTimerEventSource::Action, this, &AirportItlwm::enableDeferralAction));
+    if (enableTimer)
+        fWatchdogWorkLoop->addEventSource(enableTimer);
+    else
+        XYLog("init enable-deferral timer failed; wake requests will not be replayed\n");
     // Optional MSI lost-interrupt poll (-itlawdlmsipoll). Shares the watchdog's
     // workloop and command gate, so it is serialized with iwx_intr.
     int msipollDummy = 0;
@@ -2764,8 +2974,60 @@ SInt32 AirportItlwm::apple80211SkywalkRequest(UInt request,int cmd,IO80211Skywal
     return kIOReturnUnsupported;
 }
 
+// #38: replay a Wi-Fi-on request that arrived before the card was powered. Runs on the watchdog's
+// work loop, so it holds the same gate as every other driver path.
+void AirportItlwm::enableDeferralAction(IOTimerEventSource *timer)
+{
+    if (!enableDeferred)
+        return;
+    if (pmPowerState != kPowerStateOn) {
+        if (++enableDeferralTries < kEnableDeferralTries) {
+            enableTimer->setTimeoutMS(kEnableDeferralPeriodMS);
+            return;
+        }
+        // The card never came back inside the window. Stop retrying, but keep the request: if a
+        // power-on follows, kickDeferredEnable still replays it. Reporting the loss is what tells
+        // a future capture that the window, not the request, was wrong.
+        ++enableDeferredDrops;
+        ITL_DIAG_SET(this, "ItlwmEnableDeferredDrops", enableDeferredDrops, 32);
+        ITL_DIAG_SET(this, "ItlwmEnableDeferrals", enableDeferrals, 32);
+        return;
+    }
+    enableDeferred = false;
+    enableDeferralTries = 0;
+    ITL_DIAG_SET(this, "ItlwmEnableDeferrals", enableDeferrals, 32);
+    if (bsdInterface)
+        enableAdapter(bsdInterface);
+}
+
+void AirportItlwm::kickDeferredEnable()
+{
+    if (!enableDeferred)
+        return;
+    if (enableTimer)
+        enableTimer->cancelTimeout();
+    enableDeferred = false;
+    enableDeferralTries = 0;
+    if (bsdInterface)
+        enableAdapter(bsdInterface);
+}
+
 IOReturn AirportItlwm::enableAdapter(IONetworkInterface *netif)
 {
+    // #38: on a full wake macOS can ask for Wi-Fi a few milliseconds before the card is powered
+    // back on. Starting it then fails, and nothing tries again, so Wi-Fi stays off until it is
+    // toggled by hand. Hold the request instead of failing it: the timer replays it once the power
+    // state is on, and setPowerStateOn replays it immediately when the two arrive the other way
+    // round. Dark wakes never turn the power state off, so nothing changes for them.
+    if (pmPowerState != kPowerStateOn && enableTimer) {
+        enableDeferred = true;
+        ++enableDeferrals;
+        enableDeferralTries = 0;
+        enableTimer->setTimeoutMS(kEnableDeferralPeriodMS);
+        enableTimer->enable();
+        ITL_DIAG_SET(this, "ItlwmEnableDeferrals", enableDeferrals, 32);
+        return kIOReturnSuccess;
+    }
 #ifdef AIRPORT_WCL
     IOReturn status = fHalService->enable(netif);
     if (status != kIOReturnSuccess)
@@ -2959,6 +3221,12 @@ void AirportItlwm::setPowerStateOff()
 {
     XYLog("%s\n", __FUNCTION__);
     pmPowerState = kPowerStateOff;
+    // #38: a request held for the previous wake is stale here; the next wake gets its own. Leaving
+    // it armed across sleep would replay an enable into a suspend.
+    enableDeferred = false;
+    enableDeferralTries = 0;
+    if (enableTimer)
+        enableTimer->cancelTimeout();
     disableAdapter(bsdInterface);
     pmPolicyMaker->acknowledgeSetPowerState();
 }
@@ -2967,5 +3235,8 @@ void AirportItlwm::setPowerStateOn()
 {
     XYLog("%s\n", __FUNCTION__);
     pmPowerState = kPowerStateOn;
+    // #38: if the wake asked for Wi-Fi before this ran, the request is waiting. Replay it here,
+    // inside the gate, before acknowledging, so macOS sees a driver that came up with the card.
+    kickDeferredEnable();
     pmPolicyMaker->acknowledgeSetPowerState();
 }

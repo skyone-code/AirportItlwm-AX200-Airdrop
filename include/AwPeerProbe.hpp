@@ -9,6 +9,42 @@
 namespace Aw {
 constexpr size_t peerTLVPrefixBytes = 24 + 44;  // Election (5), channel sequence (18).
 constexpr size_t peerTLVSuffixBytes = 12;       // Data rate capabilities (7).
+// macOS's channel sequence, decoded from the raw ioctl payload. The header struct is stale: the
+// real payload is +5 entry count, +6 encoding, +7 step count (presence mode - 1), +8 duplicate
+// count, +9 fill channel, +12 entries of 12-byte apple80211_channel. Sixteen slots laid out the
+// 0.7 way: slot i names entry (i * presenceMode) % count, and a zero channel means "not on AWDL
+// this slot" - the schedule stays on the infrastructure channel instead of being rewritten.
+struct AwChanSeqPlan {
+    uint8_t duplicateCount;
+    uint8_t stepCount;
+    uint8_t fillPair[2];   // already encoded: 0xffff when fill is 255, else fill | class(fill) << 8
+    uint8_t slotChan[16];
+    uint8_t slotClass[16];
+};
+
+inline bool awBuildChanSeqPlan(const uint8_t *raw, size_t length, AwChanSeqPlan *out) {
+    if (!raw || !out || length < 12) return false;
+    const size_t count = raw[5];
+    if (count < 1 || count > 32 || length < 12 + 12 * count) return false;
+    if (raw[7] == 0xff) return false;
+    const uint16_t presenceMode = uint16_t(raw[7] + 1);
+    out->duplicateCount = raw[8];
+    out->stepCount = raw[7];
+    const uint8_t fill = raw[9];
+    if (fill == 255) {
+        out->fillPair[0] = 0xff;
+        out->fillPair[1] = 0xff;
+    } else {
+        out->fillPair[0] = fill;
+        out->fillPair[1] = chanSeqOpClass(fill);
+    }
+    for (unsigned i = 0; i < 16; ++i) {
+        const uint32_t channel = read32(raw + 12 + 12 * ((i * presenceMode) % count) + 4);
+        out->slotChan[i] = uint8_t(channel);
+        out->slotClass[i] = chanSeqOpClass(uint8_t(channel));
+    }
+    return true;
+}
 // Adds TLVs 5 and 18 before the native template's TLVs and 7 after them. Our
 // metric comes from the template's election v2 TLV, so both TLVs agree and this
 // claims nothing the template doesn't. Nothing is written unless all checks pass.
@@ -16,7 +52,7 @@ constexpr size_t peerTLVSuffixBytes = 12;       // Data rate capabilities (7).
 // `twoStreams` advertises MCS 8 to 15 as well, matching the HT capabilities the driver reports to macOS with
 // -itlawdlcaps (dedicated mode's VHT runs had both).
 inline bool extendWithPeerTLVs(uint8_t *tlvs, size_t *length, size_t capacity, const uint8_t *address, uint8_t channel = 6,
-                               uint8_t channelClass = 0, bool twoStreams = false) {
+                               uint8_t channelClass = 0, bool twoStreams = false, const AwChanSeqPlan *chanSeqPlan = nullptr) {
     if (!tlvs || !length || !address) return false;
     // A channel outside the fixed-schedule list can't be described, so nothing is added. An explicit
     // class must be the channel's 20 MHz class, or 128 (80 MHz) for a 5 GHz channel.
@@ -54,10 +90,19 @@ inline bool extendWithPeerTLVs(uint8_t *tlvs, size_t *length, size_t capacity, c
     // is a global operating class: 0x51 (81) is how a captured peer encodes channel
     // 6, and 124 is the 20 MHz class containing channel 149.
     p[0] = 18; write16(p + 1, 41);
-    const uint8_t header[6] = {15, 3, 0, 3, 0xff, 0xff};
-    for (unsigned i = 0; i < 6; ++i) p[3 + i] = header[i];
-    const uint8_t opClass = channelClass ? channelClass : globalOperatingClass20(channel);
-    for (unsigned i = 0; i < 16; ++i) { p[9 + 2*i] = channel; p[10 + 2*i] = opClass; }
+    if (chanSeqPlan) {
+        // macOS's own sequence, verbatim: header fields and all sixteen slots. A zero channel is
+        // kept as zero - it tells the peer we are on the infrastructure channel in that slot.
+        const uint8_t header[6] = {15, 3, chanSeqPlan->duplicateCount, chanSeqPlan->stepCount,
+                                   chanSeqPlan->fillPair[0], chanSeqPlan->fillPair[1]};
+        for (unsigned i = 0; i < 6; ++i) p[3 + i] = header[i];
+        for (unsigned i = 0; i < 16; ++i) { p[9 + 2*i] = chanSeqPlan->slotChan[i]; p[10 + 2*i] = chanSeqPlan->slotClass[i]; }
+    } else {
+        const uint8_t header[6] = {15, 3, 0, 3, 0xff, 0xff};
+        for (unsigned i = 0; i < 6; ++i) p[3 + i] = header[i];
+        const uint8_t opClass = channelClass ? channelClass : globalOperatingClass20(channel);
+        for (unsigned i = 0; i < 16; ++i) { p[9 + 2*i] = channel; p[10 + 2*i] = opClass; }
+    }
     if (nativeRates) {
         *length = old + peerTLVPrefixBytes;
         return true;

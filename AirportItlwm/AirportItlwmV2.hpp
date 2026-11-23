@@ -176,7 +176,14 @@ public:
     void releaseAll();
     void watchdogAction(IOTimerEventSource *timer);
     void msipollAction(IOTimerEventSource *timer);
+    // #38: a full wake can ask for Wi-Fi a few milliseconds before the card is powered back on.
+    // The request is held and replayed once the power state is on again, instead of failing with
+    // nothing to retry it. Dark wakes never set the power state off, so they are untouched.
+    void enableDeferralAction(IOTimerEventSource *timer);
+    void kickDeferredEnable();
 #define kMsipollPeriod 100
+#define kEnableDeferralPeriodMS 20
+#define kEnableDeferralTries 200   // 20 ms apart: a four second window, then report the loss
     
     virtual SInt32 enableFeature(IO80211FeatureCode, void*) override;
     virtual bool isCommandProhibited(int command) override {
@@ -247,6 +254,9 @@ public:
     IOTimerEventSource *watchdogTimer;
     IOTimerEventSource *msipollTimer = nullptr;
     bool msipollEnabled = false;
+    IOTimerEventSource *enableTimer = nullptr;
+    bool enableDeferred = false;
+    unsigned enableDeferrals = 0, enableDeferredDrops = 0, enableDeferralTries = 0;
     IOPCIDevice *pciNub;
     IONetworkStats *fpNetStats;
     AirportItlwmEthernetInterface *bsdInterface;
@@ -284,6 +294,9 @@ public:
     bool awdlExtendFrames;
     // -itlawdlhideinfra (test, #24): sync frames leave out the Mac's Wi-Fi network and channel.
     bool awdlHideInfra;
+    // -itlawdlchanseq: announce macOS's own channel sequence (from the chan-seq ioctl) instead of
+    // the fixed-channel slate. Changes what every peer reads from our TLV 18; opt-in until tested.
+    bool awdlChanSeq;
     uint16_t awdlProbeSequence = 0;
     bool awdlManagementInputEnabled;
     UInt32 awdlManagementActive;

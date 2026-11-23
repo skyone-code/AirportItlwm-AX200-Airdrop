@@ -133,10 +133,19 @@ constexpr bool validCountry(const char *c) {
     return c && c[0] >= 'A' && c[0] <= 'Z' && c[1] >= 'A' && c[1] <= 'Z' && !c[2];
 }
 // Firmware Bluetooth coexistence mode for a test boot: 1 network, 2 Bluetooth, 3 Wi-Fi.
-// Anything else keeps the driver's default of favouring Wi-Fi. Off (0) isn't offered,
-// because disabling arbitration on a shared radio isn't a useful test.
+// Anything else keeps the driver's default. Off (0) isn't offered, because disabling
+// arbitration on a shared radio isn't a useful test. 1 is the default: the shared mode
+// Linux asks for, where Bluetooth calls and audio win over a busy Wi-Fi link.
 constexpr uint32_t btCoexModeFor(int requested, uint32_t fallback) {
     return requested >= 1 && requested <= 3 ? uint32_t(requested) : fallback;
+}
+// Module bits sent with the mode. Multi-priority table (bit 0, the value 0x15 the firmware
+// reports back), SCO sync (bit 2) and high-band return (bit 4) are what Linux enables; they
+// only make sense in the shared mode. Wi-Fi-first (3) and Bluetooth-first (2) keep the old
+// zero, so -itlawdlbtcoex=3 still reproduces the pre-#92 behaviour exactly.
+constexpr uint32_t kBtCoexLinuxModules = (1U << 0) | (1U << 2) | (1U << 4);
+constexpr uint32_t btCoexModulesFor(uint32_t mode) {
+    return mode == 1 ? kBtCoexLinuxModules : 0U;
 }
 constexpr bool ackProbeIsPeer(AckProbe p) {
     return p == AckProbe::PeerAWDL || p == AckProbe::PeerHardware || p == AckProbe::PeerNeighbor || p == AckProbe::PeerEcho || p == AckProbe::PeerForeign;

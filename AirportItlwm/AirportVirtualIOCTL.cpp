@@ -8,6 +8,9 @@
 
 #include "AirportItlwm.hpp"
 
+// Defined in the hal: hands the peer manager's channel choice to the plan follower's hop.
+extern void itlAWDLSchedNoteHop(unsigned channel);
+
 
 SInt32 AirportItlwm::
 apple80211VirtualRequest(UInt request_type, int request_number, IO80211VirtualInterface *interface, void *data)
@@ -346,6 +349,9 @@ setAWDL_MASTER_CHANNEL(OSObject *object, struct apple80211_awdl_master_channel *
 {
     XYLog("%s master_channel=%d\n", __FUNCTION__, data->master_channel);
     awdlMasterChannel = data->master_channel;
+    // macOS has named the AWDL channel; the plan follower's hop uses it as its target
+    // (0.7-equivalent: the master channel comes from the peer manager, never from us).
+    itlAWDLSchedNoteHop(data->master_channel);
     return kIOReturnSuccess;
 }
 
@@ -497,6 +503,17 @@ IOReturn AirportItlwm::
 setAWDL_SYNC_PARAMS(OSObject *object, struct apple80211_awdl_sync_params *data)
 {
     XYLog("%s availability_window_length=%d availability_window_period=%d extension_length=%d synchronization_frame_period=%d\n", __FUNCTION__, data->availability_window_length, data->availability_window_period, data->extension_length, data->synchronization_frame_period);
+    // macOS owns the AWDL availability plan: its own Wi-Fi driver runs exactly this one, and every
+    // Apple peer schedules its sends into the windows we announce. These four numbers used to be
+    // logged and dropped, so the driver could only ever describe a plan of its own invention.
+    // Hand them to the 802.11 layer, where the AWDL slot clock reads them (ItlIwx, -itlawdlsched).
+    struct ieee80211com *ic = fHalService ? fHalService->get80211Controller() : nullptr;
+    if (ic) {
+        ic->ic_awdl_aw_length = uint16_t(data->availability_window_length > 0xffff ? 0xffff : data->availability_window_length);
+        ic->ic_awdl_aw_period = uint16_t(data->availability_window_period > 0xffff ? 0xffff : data->availability_window_period);
+        ic->ic_awdl_ext_length = uint16_t(data->extension_length > 0xffff ? 0xffff : data->extension_length);
+        ic->ic_awdl_sync_period = uint16_t(data->synchronization_frame_period > 0xffff ? 0xffff : data->synchronization_frame_period);
+    }
     return kIOReturnSuccess;
 }
 
